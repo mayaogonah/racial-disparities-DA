@@ -1,0 +1,4085 @@
+---
+title: "Ethnoracial Disparities in Disciplinary Action"
+subtitle: "<b> Racial and Ethnic Disparities in Disciplinary Action in Schools, Depressive Symptoms, Substance Use and Academic Performance: Results from the ABCD Study </b><br> This document outlines the key stages in analyses, specifically it:<br> 
+&nbsp;&nbsp;&nbsp;&nbsp;1. Performs data wrangling and runs creates the matched data<br>
+&nbsp;&nbsp;&nbsp;&nbsp;2. Runs regression analyses<br>
+&nbsp;&nbsp;&nbsp;&nbsp;3. Builds visualizations."
+
+format:
+  lumo-html: 
+    primary-color: "#b5cef7"
+    github-repo: "https://github.com/mayaogonah" 
+    self-contained: true
+    is-particlejs-enabled: true  # optional: display interactive particles in the doc header
+    #bg-image:  # optional: add a background image
+    code-fold: show
+
+execute:
+  eval: false
+  echo: true
+author: Siqi Wang (updated for ABCD 6.1 data release by Maya Ogonah)
+date: today
+---
+
+------------------------------------------------------------------------
+
+# Data Wrangling and Create the Matched Data
+
+## Step 0: Install Required Packages (Run Once)
+
+```{r install-packages, eval=FALSE}
+# ============================================================
+# RUN THIS CHUNK ONLY ONCE when setting up on a new computer.
+# It installs all the R packages (add-on tools) this project needs.
+# After packages are installed, you do NOT need to run this again.
+# ============================================================
+
+install.packages(
+  c(
+    'dplyr',      # Tools for filtering, selecting, and transforming data
+    'purrr',      # Tools for applying functions repeatedly (used in merge)
+    'tidyr',      # Tools for reshaping data (wide <-> long format)
+    'ggplot2',    # Creating charts and plots
+    'Hmisc',      # Descriptive statistics (describe() function)
+    'gtsummary',  # Publication-ready summary tables
+    'MatchIt',    # Propensity score matching
+    'mice',       # Multiple imputation for missing data
+    'VIM',        # Visualizing missing data patterns
+    'table1',     # Table 1 demographic summary tables
+    'flextable',  # Formatting tables for Word export
+    'officer',    # Saving formatted tables to Word (.docx) files
+    'hrbrthemes', # data visualisation themes
+    'cowplot',    # combining plots
+    'report',     # reporting ANOVA results
+    'cobalt',     # assessing covariate balance
+    'ggalluvial'  # adds geom_alluvium() and geom_stratum() to ggplot2 for Sankey/alluvial plots
+  ),
+  repos = 'https://cran.r-project.org/'
+)
+```
+
+Install `renv` and initialise the project (run once). The `renv` package creates an isolated, project specific environment that records the packages and their versions used in the script.
+
+```{r renv, eval=FALSE}
+install.packages("renv")
+renv::init()
+
+# to update the project dependencies
+renv::snapshot()
+```
+
+------------------------------------------------------------------------
+
+## Step 1: Load Packages
+
+Load all required packages into R's memory.
+
+```{r load-packages, message=FALSE, warning=FALSE}
+library(dplyr)      # Data manipulation
+library(purrr)      # Functional programming (used in reduce() for merging)
+library(tidyr)      # Data reshaping (pivot_wider, drop_na, etc.)
+library(ggplot2)    # Plotting
+library(Hmisc)      # Descriptive statistics
+library(gtsummary)  # Summary tables
+library(naniar)     # Missing data
+library(VIM)        # Missing data patterns
+library(MatchIt)    # Propensity score matching
+library(mice)       # Multiple imputation
+library(VIM)        # Missing data visualization
+library(table1)     # Table 1 summaries
+library(flextable)  # Formatted tables
+library(officer)    # Word document export
+library(stringr)    # ~ str_remove() function
+library(hrbrthemes) # data visualisation themes
+library(cowplot)    # combining plots
+library(cobalt)     # assessing covariate balance
+library(report)     # reporting ANOVA results 
+library(ggalluvial) # adds geom_alluvium() and geom_stratum() to ggplot2 for Sankey/alluvial plots
+```
+
+------------------------------------------------------------------------
+
+## Step 2: Create Data Visualisation Theme
+
+These custom functions create a dataviz theme using the Klimt palette from the `MetBrewer` package.
+
+```{r data-vis}
+scale_color_brand <- function() {
+  custom_palette <- MetBrewer::met.brewer(name = "Klimt", n=25, type="continuous") # <1>
+  scale_color_manual(values = custom_palette)
+}
+
+scale_fill_brand <- function(picks = NULL, labels = NULL) {
+  custom_palette <- MetBrewer::met.brewer(name = "Klimt", n=25, type="continuous")
+  if (!is.null(picks)) {
+    custom_palette <- custom_palette[picks]
+  }
+  if (is.null(labels)) {
+    scale_fill_manual(values = custom_palette)
+  } else {
+    scale_fill_manual(values = custom_palette, labels = labels)
+  }
+}
+
+palette <- MetBrewer::met.brewer(name = "Klimt", n=25, type="continuous")
+
+theme_brand <- function() {
+  theme_ipsum() + # <2>
+    theme(
+      plot.title = element_text(color = "black", size = 14, face = "bold"),
+      plot.subtitle = element_text(margin = margin(b = 20)),
+      axis.text.x = element_text(size = 7),
+      axis.text.y = element_text(size = 7),
+      axis.title.x = element_text(hjust = 0.5),  # center x-axis label
+      axis.title.y = element_text(hjust = 0.5),  # center y-axis label
+      plot.background = element_rect(fill = "gray97", color = NA),
+      plot.caption = element_text(hjust = 0)
+    )
+}
+
+theme_colors <- MetBrewer::met.brewer(name = "Klimt", n = 25, type = "continuous")
+```
+
+1.  The n function allows you to extend the number of values so the colour palette can still be used on graphs with numerous categorical values.
+2.  You can change the font using the hrbrthemes package. I don't have the other fonts installed, and its a bit of a pain to install them, hence why I used theme_ipsum.
+
+```{r}
+scales::show_col(MetBrewer::met.brewer(name = "Klimt", n = 25, type = "continuous"))
+```
+
+------------------------------------------------------------------------
+
+## Step 3: Define Helper Functions
+
+This custom function pivots a LONG-format dataset to WIDE format.
+
+ARGUMENTS:
+
+1\. dataset - a data frame with columns: participant_id, session_id, \[column\]
+
+2\. column - the name of the variable to pivot (as a string)
+
+3\. targeted_outcome - optional; if provided, also creates an "ever\_\[column\]" column that is 1 if the participant EVER had that value
+
+OUTPUT: a wide-format data frame with one row per participant
+
+```{r define-functions}
+pivot_wide <- function(dataset, column, targeted_outcome = NULL) {
+
+  # Validate that the required columns exist
+  if (!("eventname" %in% colnames(dataset))) {
+    stop("The dataset must contain a column named 'eventname'.")
+  }
+  if (!("src_subject_id" %in% colnames(dataset))) {
+    stop("The dataset must contain a column named 'src_subject_id'.")
+  }
+  if (!(column %in% colnames(dataset))) {
+    stop(paste("The column", column, "is not found in the dataset."))
+  }
+
+  # If targeted_outcome is specified, create an "ever" indicator column.
+  # Example: if column = "suspension" and targeted_outcome = 1,
+  # then ever_suspension = 1 if the participant was EVER s%uspended.
+  if (!is.null(targeted_outcome)) {
+    ever_column_name <- paste0("ever_", column)
+
+    dataset <- dataset %>%
+      group_by(src_subject_id) %>%
+      mutate(
+        !!ever_column_name := ifelse(
+          all(is.na(.data[[column]])), NA,
+          as.integer(any(.data[[column]] == targeted_outcome, na.rm = TRUE))
+        )
+      ) %>%
+      ungroup()
+  }
+
+  # Pivot from long to wide: each timepoint becomes a separate column
+  # Column names will be like: [variable]_baseline_year_1_arm_1, etc.
+  wide_dataset <- dataset %>%
+    pivot_wider(
+      id_cols     = src_subject_id,
+      names_from  = eventname,
+      values_from = c(column),
+      names_glue  = "{.value}_{eventname}"
+    )
+
+  # If an "ever" column was created, merge it back onto the wide dataset
+  if (!is.null(targeted_outcome)) {
+    wide_dataset <- wide_dataset %>%
+      left_join(
+        dataset %>%
+          select(src_subject_id, !!sym(ever_column_name)) %>%
+          distinct(),
+        by = "src_subject_id"
+      )
+  }
+
+  return(wide_dataset)
+}
+```
+
+------------------------------------------------------------------------
+
+## Step 4: Load Raw Data
+
+Load all required raw data from the ABCD Study dataset.
+
+```{r load-data}
+
+DEMO_COLS    <- c("participant_id", "session_id", "site",
+                  "ab_g_stc__cohort_ethnrace__mhisp", "ab_g_stc__cohort_ethn",
+                  "ab_g_dyn__visit_age", "ab_g_stc__cohort_sex",
+                  "ab_g_dyn__cohort_income__hhold__6lvl", "ab_p_demo__marital__slf_001",
+                  "ab_g_dyn__cohort_edu__cgs", "ab_p_demo__race_001___11")
+
+KBI_COLS     <- c("participant_id", "session_id",
+                  "mh_p_kbi__school_003", "mh_p_kbi__school_004")
+
+SEDA_COLS    <- c("participant_id", "session_id",
+                  "le_l_sedarec__distr__urban_indicator__2019",
+                  "le_l_urban__addr1_urbanclassification")
+
+CRPBI_COLS   <- c("participant_id", "session_id",
+                  "fc_y_crpbi__cg2_000")
+
+CBCL_COLS    <- c("participant_id", "session_id",
+                  "mh_p_cbcl__synd__ext_tscore", "mh_p_cbcl__dsm__dep_tscore",
+                  "mh_p_cbcl__synd__rule_tscore", "mh_p_cbcl__synd__rule_sum",
+                  "mh_p_cbcl__synd__int_tscore", "mh_p_cbcl__rule__cond_002",
+                  "mh_p_cbcl__aggr__opp_003")
+
+TLFB_COLS    <- c("participant_id", "session_id",
+                  "su_y_tlfb__nic_ud", "su_y_tlfb_ud")
+
+SAG_COLS     <- c("participant_id", "session_id",
+                  "fc_p_sag_005")
+
+SUI_COLS     <- c("participant_id", "session_id")
+
+abcd_all <- readxl::read_excel("data/7.0-data.xlsx")
+
+  p_demo            <- abcd_all[, intersect(DEMO_COLS,  colnames(abcd_all))]
+  mh_p_ksads_bg     <- abcd_all[, intersect(KBI_COLS,   colnames(abcd_all))]
+  led_l_seda_demo_d <- abcd_all[, intersect(SEDA_COLS,  colnames(abcd_all))]
+  ce_y_crpbi        <- abcd_all[, intersect(CRPBI_COLS, colnames(abcd_all))]
+  cbcl              <- abcd_all[, intersect(CBCL_COLS,  colnames(abcd_all))]
+  su_y_tlfb         <- abcd_all[, intersect(TLFB_COLS,  colnames(abcd_all))]
+  ce_p_sag          <- abcd_all[, intersect(SAG_COLS,   colnames(abcd_all))]
+  su_y_sui          <- abcd_all[, intersect(SUI_COLS,   colnames(abcd_all))]
+
+```
+
+------------------------------------------------------------------------
+
+## Step 4b: Rename Variable names
+
+The new ABCD release uses different variable names from 5.1. We rename them here once so that ALL code from Step 5 onward can continue using the original names unchanged.
+
+```{r rename-to-internal-names}
+# ============================================================
+# RENAME NEW RELEASE VARIABLE NAMES             -> INTERNAL NAMES
+#
+# New release name                              -> Internal name used in code
+# ---------------------------------------------------------------
+# participant_id                                -> src_subject_id
+# session_id                                    -> eventname
+# ab_g_stc__cohort_ethnrace__mhisp              -> race_ethnicity
+# ab_g_stc__cohort_ethn                         -> demo_ethn_v2
+# ab_g_dyn__visit_age                           -> demo_brthdat_v2
+# ab_g_stc__cohort_sex                          -> demo_sex_v2
+# ab_g_dyn__cohort_income__hhold__6lvl          -> demo_prnt_income_v2
+# ab_p_demo__marital__slf_001                   -> demo_prnt_marital_v2
+# ab_g_dyn__cohort_edu__cgs                     -> demo_prnt_ed_v2_2yr_l
+# ab_p_demo__race_001___11                      -> demo_race_a_p___11
+# mh_p_kbi__school_003                          -> kbi_p_c_det_susp_l
+# mh_p_kbi__school_004                          -> kbi_p_c_school_setting
+# le_l_urban__addr1_urbanclassification         -> ledsch_seda_d_urban
+# fc_y_crpbi__cg2_000                           -> crpbi_caregiver1_y
+# mh_p_cbcl__synd__ext_tscore                   -> cbcl_scr_syn_external_t
+# mh_p_cbcl__dsm__dep_tscore                    -> cbcl_scr_dsm5_depress_t
+# mh_p_cbcl__synd__rule_tscore                  -> cbcl_scr_syn_rulebreak_t
+# mh_p_cbcl__synd__rule_sum                     -> cbcl_scr_syn_rulebreak_sum
+# mh_p_cbcl__synd__int_tscore                   -> cbcl_scr_syn_internal_t
+# mh_p_cbcl__rule__cond_002                     -> cbcl_q28_p
+# mh_p_cbcl__aggr__opp_003                      -> cbcl_q23_p
+# su_y_tlfb__nic_ud                             -> su_tlfb_cal_scr_nic_days_yr
+# su_y_tlfb_ud                                  -> tlfb_cal_scr_tot_su_ud
+# fc_p_sag_005                                  -> sag_grade_type
+#
+# rename_if_present() only renames a column if it actually exists
+# -- safe to run on both old and new release files.
+# ============================================================
+
+rename_if_present <- function(df, old, new) {
+  if (old %in% colnames(df)) df <- rename(df, !!new := !!sym(old))
+  df
+}
+
+apply_renames <- function(df) {
+  df %>%
+    rename_if_present("participant_id",                        "src_subject_id")              %>%
+    rename_if_present("session_id",                            "eventname")                   %>%
+    rename_if_present("ab_g_stc__cohort_ethnrace__mhisp",      "race_ethnicity")              %>%
+    rename_if_present("ab_g_stc__cohort_ethn",                 "demo_ethn_v2")                %>%
+    rename_if_present("ab_g_dyn__visit_age",                   "demo_brthdat_v2")             %>%
+    rename_if_present("ab_g_stc__cohort_sex",                  "demo_sex_v2")                 %>%
+    rename_if_present("ab_g_dyn__cohort_income__hhold__6lvl",  "demo_prnt_income_v2")         %>%
+    rename_if_present("ab_p_demo__marital__slf_001",           "demo_prnt_marital_v2")        %>%
+    rename_if_present("ab_g_dyn__cohort_edu__cgs",             "demo_prnt_ed_v2_2yr_l")       %>%
+    rename_if_present("ab_p_demo__race_001___11",              "demo_race_a_p___11")          %>%
+    rename_if_present("mh_p_kbi__school_003",                  "kbi_p_c_det_susp_l")          %>%
+    rename_if_present("mh_p_kbi__school_004",                  "kbi_p_c_school_setting")      %>%
+    rename_if_present("le_l_urban__addr1_urbanclassification", "ledsch_seda_d_urban")         %>%
+    rename_if_present("fc_y_crpbi__cg2_000",                   "crpbi_caregiver1_y")          %>%
+    rename_if_present("mh_p_cbcl__synd__ext_tscore",           "cbcl_scr_syn_external_t")     %>%
+    rename_if_present("mh_p_cbcl__dsm__dep_tscore",            "cbcl_scr_dsm5_depress_t")     %>%
+    rename_if_present("mh_p_cbcl__synd__rule_tscore",          "cbcl_scr_syn_rulebreak_t")    %>%
+    rename_if_present("mh_p_cbcl__synd__rule_sum",             "cbcl_scr_syn_rulebreak_sum")  %>%
+    rename_if_present("mh_p_cbcl__synd__int_tscore",           "cbcl_scr_syn_internal_t")     %>%
+    rename_if_present("mh_p_cbcl__rule__cond_002",             "cbcl_q28_p")                  %>%
+    rename_if_present("mh_p_cbcl__aggr__opp_003",              "cbcl_q23_p")                  %>%
+    rename_if_present("su_y_tlfb__nic_ud",                     "su_tlfb_cal_scr_nic_days_yr") %>%
+    rename_if_present("su_y_tlfb_ud",                          "tlfb_cal_scr_tot_su_ud")      %>%
+    rename_if_present("fc_p_sag_005",                          "sag_grade_type")
+}
+
+p_demo            <- apply_renames(p_demo)
+mh_p_ksads_bg     <- apply_renames(mh_p_ksads_bg)
+led_l_seda_demo_d <- apply_renames(led_l_seda_demo_d)
+ce_y_crpbi        <- apply_renames(ce_y_crpbi)
+cbcl              <- apply_renames(cbcl)
+su_y_tlfb         <- apply_renames(su_y_tlfb)
+ce_p_sag          <- apply_renames(ce_p_sag)
+su_y_sui          <- apply_renames(su_y_sui)
+abcd_all          <- apply_renames(abcd_all)
+
+cat("Renaming complete. Columns in p_demo:\n")
+print(colnames(p_demo))
+
+```
+
+------------------------------------------------------------------------
+
+## Step 5: Data Wrangling -- Build the Baseline Dataset
+
+The ABCD variable `ab_g_stc__cohort_ethnrace__mhisp` (recoded as `race_ethnicity`) uses category 11 for "Multiracial Hispanic" and category 12 for "Multiracial non-Hispanic". We refine these by checking additional race questions:
+
+- If they also selected Black (demo_race_a_p\_\_\_11 == 1), recode to 12 (Multiracial Black) This gives us more granular race groups for analysis.
+
+- If they do not identify as black (demo_race_a_p\_\_\_11 != 1), recode to 13 (Other).
+
+```{r recode-race}
+# ============================================================
+# RACE/ETHNICITY RECODING
+# current coding for race_ethnicity
+#   1 = Hispanic
+#   2 = White
+#   3 = Black
+#   7 = Asian/Pacific Islander
+#   11 = Multiracial + Hispanic
+#   12 = Multiracial + non-Hispanic 
+#   13 = Other 
+# ============================================================
+p_demo <- p_demo %>%
+  mutate(race_ethnicity = case_when(
+    race_ethnicity == 1                                  ~ 1, # hispanic
+    race_ethnicity == 2                                  ~ 2, # white
+    race_ethnicity == 3                                  ~ 3, # black
+    race_ethnicity == 7                                  ~ 4, # asian/pacific islander
+    race_ethnicity == 11                                 ~ 5, # multiracial + hispanic
+    race_ethnicity == 12 & demo_race_a_p___11 == 1       ~ 6, # multiracial + black
+    race_ethnicity == 12 & (demo_race_a_p___11 != 1
+                            | is.na(demo_race_a_p___11)) ~ 7, # other
+    race_ethnicity == 13                                 ~ 7, # other
+    TRUE                                                 ~ race_ethnicity
+  )) 
+
+```
+
+The ABCD data is longitudinal (multiple timepoints per child). For background/covariate variables, we only want BASELINE values (collected at the start of the study, when children were \~9-10 years old). We then merge all baseline datasets into one wide table using `reduce()` and `merge()`. The result is one row per participant with all covariates.
+
+```{r subset-baseline}
+# ============================================================
+# SUBSET TO BASELINE TIMEPOINT
+# ============================================================
+
+# Filter each dataset to baseline only
+p_demo_baseline            <- subset(p_demo,            eventname == "ses-00A")
+mh_p_ksads_bg_baseline     <- subset(mh_p_ksads_bg,     eventname == "ses-00A")
+led_l_seda_demo_d_baseline <- subset(led_l_seda_demo_d, eventname == "ses-00A")
+ce_y_crpbi_baseline        <- subset(ce_y_crpbi,        eventname == "ses-00A")
+cbcl_baseline              <- subset(cbcl,              eventname == "ses-00A")
+
+# Merge all baseline datasets together by participant ID (src_subject_id).
+# reduce() applies merge() repeatedly across the list.
+# all = TRUE means keep all participants even if missing from one dataset.
+background_df <- reduce(
+  list(p_demo_baseline, mh_p_ksads_bg_baseline,
+       led_l_seda_demo_d_baseline, ce_y_crpbi_baseline, cbcl_baseline),
+  function(x, y) merge(x, y, by = "src_subject_id", all = TRUE)
+)
+
+# Select only the columns we need for analysis
+# (keeps the dataset small and easier to work with)
+filtered_df <- background_df %>%
+  select(
+    src_subject_id,
+    site,                       # Data collection site
+    demo_brthdat_v2,            # Age (at visit, i.e., baseline)
+    demo_sex_v2,                # Sex (1=Male, 2=Female)
+    race_ethnicity,             # Recoded race/ethnicity
+    demo_prnt_income_v2,        # Household income bracket
+    ledsch_seda_d_urban,        # Rural (1) vs. Non-rural (0)
+    kbi_p_c_school_setting,     # School type (public/private/home)
+    crpbi_caregiver1_y,         # Secondary caregiver support
+    demo_prnt_marital_v2,       # Parental marital status
+    cbcl_scr_syn_external_t,    # CBCL Externalizing T-score
+    cbcl_scr_dsm5_depress_t,    # CBCL Depression T-score
+    cbcl_scr_syn_rulebreak_t,   # CBCL Rule-Breaking T-score
+   #cbcl_scr_syn_rulebreak_sum, # CBCL Rule-Breaking Sum 
+    cbcl_q28_p,                 # CBCL item 28
+    cbcl_q23_p                  # CBCL item 23
+  )
+
+# --- Parental Education (special handling) ---
+# Education level can be updated at later timepoints, so we grab the
+# MOST RECENT non-missing value per participant rather than baseline only.
+parental_education <- p_demo %>%
+  select(src_subject_id, demo_prnt_ed_v2_2yr_l) %>%
+  drop_na(demo_prnt_ed_v2_2yr_l) %>%
+  distinct(src_subject_id, .keep_all = TRUE)   # Keep one row per participant
+
+nrow(filtered_df)
+# Merge parental education back into the baseline dataset
+filtered_df_baseline <- merge(filtered_df, parental_education, by = "src_subject_id", all.x = TRUE)
+
+nrow(filtered_df_baseline)
+```
+
+Raw ABCD codes use many fine-grained numeric categories. We collapse these into broader brackets for cleaner analysis. Missing/refused/don't know responses are recoded to NA.
+
+```{r recode-covariates}
+# ============================================================
+# RECODE CATEGORICAL VARIABLES INTO ANALYSIS-READY BRACKETS
+# ============================================================
+
+# --- Household Income ---
+# New: 5 brackets (<50K, 50-75K, 75-100K, 100-200K, >200K)
+filtered_df_baseline <- filtered_df_baseline %>%
+  mutate(
+    income_bracket = case_when(
+      demo_prnt_income_v2 %in% 1:2   ~ 1,        # < $50,000
+      demo_prnt_income_v2 == 3       ~ 2,        # $50,000 - $74,999
+      demo_prnt_income_v2 == 4       ~ 3,        # $75,000 - $99,999
+      demo_prnt_income_v2 == 5       ~ 4,        # $100,000 - $199,999
+      demo_prnt_income_v2 == 6       ~ 5,        # >= $200,000
+      demo_prnt_income_v2 == 777     ~ 777,      # Refused
+      demo_prnt_income_v2 == 999     ~ 999,      # Don't know
+      TRUE                           ~ NA_real_
+    )
+  ) %>%
+  select(-demo_prnt_income_v2)   # Remove the original column (no longer needed)
+
+# --- Parental Education ---
+# New: 5 brackets from "Up to high school (no diploma)" to "Graduate degree or professional"
+filtered_df_baseline <- filtered_df_baseline %>%
+  mutate(
+    parental_ed_bracket = case_when(
+      demo_prnt_ed_v2_2yr_l == 777                 ~ NA_real_, # Refused
+      demo_prnt_ed_v2_2yr_l == 999                 ~ NA_real_, # Don't know
+      TRUE                                         ~ demo_prnt_ed_v2_2yr_l
+    )
+  )
+
+# --- Parental Marital Status ---
+# Original: 1-6 scale + 777
+# New: 3 groups (Married/Partner, Separated/Divorced/Widowed, Never Married)
+filtered_df_baseline <- filtered_df_baseline %>%
+  mutate(
+    marital_status_bracket = case_when(
+      demo_prnt_marital_v2 %in% c(1, 6)    ~ 1,        # Married or living with partner
+      demo_prnt_marital_v2 %in% c(2, 3, 4) ~ 2,        # Widowed / Divorced / Separated
+      demo_prnt_marital_v2 == 5            ~ 3,        # Never married
+      demo_prnt_marital_v2 == 777          ~ NA_real_, # Refused
+      TRUE                                 ~ NA_real_
+    )
+  ) %>%
+  select(-demo_prnt_marital_v2)   # Remove original column
+
+# Convert sex, urban, marital status and caregiver to factor (categorical) type
+filtered_df_baseline$demo_sex_v2 <- as.factor(filtered_df_baseline$demo_sex_v2)
+filtered_df_baseline$ledsch_seda_d_urban <- as.factor(filtered_df_baseline$ledsch_seda_d_urban)
+filtered_df_baseline$crpbi_caregiver1_y  <- as.factor(filtered_df_baseline$crpbi_caregiver1_y)
+filtered_df_baseline$marital_status_bracket <- as.factor(filtered_df_baseline$marital_status_bracket)
+```
+
+Suspension data (kbi_p_c_det_susp_l) is in long-format across timepoints.
+
+GOAL: Create a binary variable "ed_det_susp_baseline_3" that equals:
+
+\- 1 = child was suspended at LEAST ONCE by the 3-year follow-up
+
+\- 0 = child was never suspended through the 3-year follow-up
+
+We also create "ed_det_susp_count" = total number of timepoints with a recorded suspension (0, 1, or 3 out of the first three follow-ups).
+
+::: callout-note
+Baseline suspension data is all missing in this dataset, so we only use year 1, 2 and 3 follow-up timepoints.
+:::
+
+```{r build-suspension-outcome}
+# ============================================================
+# BUILD THE SUSPENSION OUTCOME VARIABLE
+# ============================================================
+
+# Recode raw values: 1=Yes, 0=No -> 0, anything else -> NA
+mh_p_ksads_bg <- mh_p_ksads_bg %>%
+  mutate(
+    administered = TRUE,  # every row in long format means the item was administered that wave
+    kbi_p_c_det_susp_l = case_when(
+      kbi_p_c_det_susp_l == 999   ~ NA_real_,  # not sure
+      kbi_p_c_det_susp_l == 777   ~ NA_real_,  # declined to answer
+      TRUE                        ~ kbi_p_c_det_susp_l
+    )
+  )
+
+# Pivot suspension data to wide format (one column per timepoint)
+susp <- mh_p_ksads_bg[, c("src_subject_id", "eventname", "kbi_p_c_det_susp_l", "administered")]
+susp_wide <- susp %>%
+  pivot_wider(
+    id_cols     = src_subject_id,
+    names_from  = eventname,
+    values_from = c(kbi_p_c_det_susp_l, administered), 
+    names_glue  = "{eventname}_{.value}"
+  ) %>%
+  rename_with(
+    .fn   = ~ str_remove(., "_kbi_p_c_det_susp_l"),  # strip the value-name suffix from the disciplinary action columns
+    .cols = ends_with("_kbi_p_c_det_susp_l")
+  ) %>% 
+  rename_with(
+    .fn   = ~ paste0("ed_", .),   # Prefix all timepoint columns with "ed_"
+    .cols = -src_subject_id
+  )
+
+# Create binary "ever suspended" indicator using years 1, 2 and 3 follow-up
+# 1 = suspended at year 1 OR year 2 OR year 3; 0 = not suspended at any
+# NA is only assigned when the participants has NA across all three waves
+# this treats "missing at wave 1 and 2, but 0 at wave 3" as a confirmed 0 for the whole period
+susp_wide <- susp_wide %>%
+  mutate(
+    n_nonmissing = rowSums(!is.na(select(., `ed_ses-01A`, `ed_ses-02A`, `ed_ses-03A`))),
+    n_yes        = rowSums(select(., `ed_ses-01A`, `ed_ses-02A`, `ed_ses-03A`) == 1, na.rm = TRUE),
+    ed_det_susp_baseline_3 = case_when(
+      n_yes > 0        ~ 1,
+      n_nonmissing == 0 ~ NA_real_,
+      TRUE              ~ 0
+    )
+  ) %>%
+  select(-n_nonmissing, -n_yes)
+
+# old code by Siqi
+#susp_wide <- susp_wide %>%
+  #mutate(
+    #ed_det_susp_baseline_3 = if_else(
+      #`ed_ses-01A` == 1 |
+      #`ed_ses-02A` == 1 | 
+      #`ed_ses-03A` == 1,
+      #1, 0
+    #)
+  #)
+
+# Create count variable: how many timepoints had a suspension (0, 1, or 2)
+susp_wide <- susp_wide %>%
+  mutate(
+    ed_det_susp_count = rowSums(
+      select(., "ed_ses-01A", "ed_ses-02A") == 1,
+      na.rm = TRUE
+    )
+  )
+
+# Merge suspension data onto the baseline covariate dataset
+filtered_df_baseline_ed <- left_join(filtered_df_baseline, susp_wide, by = "src_subject_id")
+```
+
+Convert numeric codes to readable category labels. This makes tables and plots automatically show human-readable text instead of numbers like "1", "2", "3".
+
+```{r recode-labels}
+# ============================================================
+# APPLY FACTOR LABELS FOR TABLE DISPLAY
+# ============================================================
+
+filtered_df_baseline_recoded <- filtered_df_baseline_ed %>%
+  mutate(
+    race_ethnicity = factor(
+      race_ethnicity,
+      levels = c(1, 2, 3, 4, 5, 6, 7),
+      labels = c("Hispanic", "White", "Black", "Asian and Pacific Islander",
+                 "Multiracial Hispanic", "Multiracial Black", "Other")
+    ),
+    demo_sex_v2 = factor(
+      demo_sex_v2,
+      levels = c(1, 2),
+      labels = c("Male", "Female")
+    ),
+    ledsch_seda_d_urban = factor(
+      ledsch_seda_d_urban,
+      levels = c(1, 2, 3),
+      labels = c("Urban", "Urban clusters", "Rural")
+    ),
+    # School type: several codes collapse into "Other"
+    kbi_p_c_school_setting = factor(
+      kbi_p_c_school_setting,
+      levels = c(2, 3, 6, 1, 4, 5, 7, 8, 9),
+      labels = c("Regular Public School", "Regular Private School", "Home School",
+                 "Other", "Other", "Other", "Other", "Other", "Other")
+    ),
+    crpbi_caregiver1_y = factor(
+      crpbi_caregiver1_y,
+      levels = c(0, 1),
+      labels = c("No", "Yes")
+    ),
+    income_bracket = factor(
+      income_bracket,
+      levels = c(1, 2, 3, 4, 5, 777, 999),
+      labels = c("<$50K", "$50K-$75K", "$75K-$100K", "$100K-$200K", ">$200K", "Declined", "Don't know")
+    ),
+    parental_ed_bracket = factor(
+      parental_ed_bracket,
+      levels = c(1, 2, 3, 4, 5),
+      labels = c("Up to high school (no diploma)", "High school diploma/GED", "Some College", "Bachelor's degree", "Graduate or professional degree")
+    ),
+    marital_status_bracket = factor(
+      marital_status_bracket,
+      levels = c(1, 2, 3),
+      labels = c("Married/Living Together", "Separated/Divorced/Widowed", "Never Married")
+    ),
+    ed_det_susp_baseline_3 = factor(
+      ed_det_susp_baseline_3,
+      levels = c(0, 1),
+      labels = c("No", "Yes")
+    )
+  )
+
+# Apply human-readable variable labels for Table 1 display
+# (These labels appear as row headers in the summary table)
+label(filtered_df_baseline_recoded$demo_brthdat_v2)           <- "Age (at Baseline)"
+label(filtered_df_baseline_recoded$site)                      <- "Data collection site"
+label(filtered_df_baseline_recoded$demo_sex_v2)               <- "Sex"
+label(filtered_df_baseline_recoded$race_ethnicity)            <- "Race/Ethnicity"
+label(filtered_df_baseline_recoded$ledsch_seda_d_urban)       <- "Urban vs. Rural"
+label(filtered_df_baseline_recoded$kbi_p_c_school_setting)    <- "Type of School"
+label(filtered_df_baseline_recoded$crpbi_caregiver1_y)        <- "2nd Caregiver Support"
+label(filtered_df_baseline_recoded$cbcl_scr_syn_external_t)   <- "Externalizing T-score (CBCL)"
+label(filtered_df_baseline_recoded$income_bracket)            <- "Household Income"
+label(filtered_df_baseline_recoded$parental_ed_bracket)       <- "Parental Education Bracket"
+label(filtered_df_baseline_recoded$marital_status_bracket)    <- "Parental Marital Status"
+label(filtered_df_baseline_recoded$cbcl_scr_dsm5_depress_t)   <- "Depression T-score (CBCL)"
+label(filtered_df_baseline_recoded$cbcl_scr_syn_rulebreak_t)  <- "Rule Breaking T-score (CBCL)"
+label(filtered_df_baseline_recoded$ed_det_susp_baseline_3)    <- "Ever received ED (Baseline to 3yr)"
+
+# Print a quick data structure summary to verify the dataset looks correct
+str(filtered_df_baseline_recoded)
+nrow(filtered_df_baseline_recoded)
+```
+
+------------------------------------------------------------------------
+
+## Step 6: Descriptive Statistics by Race Subgroup
+
+`describe()` from the Hmisc package prints detailed summaries (counts, means, distributions) for all variables. We run this on the raw (un-labeled) dataset. First for the White participants.
+
+```{r describe-by-race}
+# ============================================================
+# QUICK DESCRIPTIVE SUMMARIES FOR RACE SUBGROUPS
+# ============================================================
+
+# Subset for White participants (race code 2)
+filtered_df_baseline_white     <- subset(filtered_df_baseline, race_ethnicity == 2)
+# Subset for Black and Hispanic participants (codes 1, 3, 5, 6)
+filtered_df_baseline_black_his <- subset(filtered_df_baseline, race_ethnicity %in% c(1, 3, 5, 6))
+
+describe(filtered_df_baseline_white)
+```
+
+Then for the Black and Hispanic participants.
+
+```{r describe-black-hispanic}
+describe(filtered_df_baseline_black_his)
+```
+
+------------------------------------------------------------------------
+
+## Step 7: Build Longitudinal Outcome Datasets
+
+Create a wide-format dataset for nicotine/tobacco use. Also create `"ever_used_tobacco" = 1` if ANY nonzero tobacco use was reported across all timepoints.
+
+```{r tobacco-wide}
+# ============================================================
+# TOBACCO USE OUTCOME (WIDE FORMAT)
+# ============================================================
+tabacco <- su_y_tlfb[, c("src_subject_id", "eventname", "su_tlfb_cal_scr_nic_days_yr")]
+tabacco_wide <- tabacco %>%
+  pivot_wider(
+    id_cols     = src_subject_id,
+    names_from  = eventname,
+    values_from = su_tlfb_cal_scr_nic_days_yr
+  ) %>%
+  rename_with(
+    .fn   = ~ paste0("tobacco_", .),
+    .cols = -src_subject_id
+  )
+
+# Create binary "ever used tobacco" indicator
+tabacco_wide <- tabacco_wide %>%
+  mutate(
+    ever_used_tobacco = ifelse(
+      rowSums(select(., starts_with("tobacco_")), na.rm = TRUE) > 0, 1, 0
+    )
+  )
+
+describe(tabacco_wide)
+```
+
+Quick check on the distribution of our key exposure variable
+
+```{r check-suspension-outcome}
+filtered_df_baseline_ed$ed_det_susp_baseline_3 <- as.factor(
+  filtered_df_baseline_ed$ed_det_susp_baseline_3
+)
+describe(filtered_df_baseline_ed$ed_det_susp_baseline_3)
+```
+
+Check suspension rates separately for White and Black/Hispanic participants
+
+```{r describe-suspension-by-race}
+filtered_df_baseline_ed_white     <- subset(filtered_df_baseline_ed, race_ethnicity == 2)
+filtered_df_baseline_ed_black_his <- subset(filtered_df_baseline_ed, race_ethnicity %in% c(1, 3, 5, 6))
+
+describe(filtered_df_baseline_ed_white$ed_det_susp_baseline_3)
+describe(filtered_df_baseline_ed_black_his$ed_det_susp_baseline_3)
+```
+
+------------------------------------------------------------------------
+
+## Step 8: Missing Data Mechanisms
+
+GOAL: Assess the extent and patterns of missing data.
+
+```{r miss-baseline}
+filtered_df_baseline %>%
+  gg_miss_var(show_pct = TRUE) + labs(title = "Proportion of missing data at baseline") + theme_brand()
+
+df_plot <- filtered_df_baseline %>% select(-src_subject_id)
+
+aggr_plot <- aggr(df_plot, plot = FALSE)  # compute without plotting
+
+plot(aggr_plot, 
+     numbers = TRUE, 
+     prop = FALSE,
+     combined = TRUE,
+     labels = names(df_plot),
+     cex.axis = 0.4,
+     las = 2)   # rotate labels vertical
+```
+
+Assess the proportion missing on detentions/suspension over time.
+
+```{r miss-suspenison, warning=FALSE, message=FALSE, fig.width=10, fig.height=8}
+# make variable titles clearer
+ed_plot <- filtered_df_baseline_recoded %>%
+  mutate(across(
+    c(`ed_ses-00A_administered`, `ed_ses-01A_administered`, `ed_ses-02A_administered`,
+      `ed_ses-03A_administered`, `ed_ses-04A_administered`, `ed_ses-05A_administered`,
+      `ed_ses-06A_administered`, `ed_ses-07A_administered`),
+    ~ replace_na(.x, FALSE)
+  )) %>%
+  mutate(
+    `ed_ses-01A` = if_else(!`ed_ses-01A_administered`, -999, `ed_ses-01A`),
+    `ed_ses-02A` = if_else(!`ed_ses-02A_administered`, -999, `ed_ses-02A`),
+    `ed_ses-03A` = if_else(!`ed_ses-03A_administered`, -999, `ed_ses-03A`)
+  ) %>%
+  mutate(
+    `Detention Baseline` = factor(`ed_ses-00A`, labels = c("No", "Yes")),
+    `Detention 1YR` = factor(`ed_ses-01A`, levels = c(-999, 0, 1), labels = c("Not administered", "No", "Yes")),
+    `Detention 2YR` = factor(`ed_ses-02A`, levels = c(-999, 0, 1), labels = c("Not administered", "No", "Yes")),
+    `Detention 3YR` = factor(`ed_ses-03A`, levels = c(-999, 0, 1), labels = c("Not administered", "No", "Yes")),
+    `Detention 4YR` = factor(`ed_ses-04A`, labels = c("No", "Yes")),
+    `Detention 5YR` = factor(`ed_ses-05A`, labels = c("No", "Yes")),
+    `Detention 6YR` = factor(`ed_ses-06A`, labels = c("No", "Yes")),
+    `Detention 7YR` = factor(`ed_ses-07A`, labels = c("No", "Yes"))
+  )
+
+ed_plot %>%
+  select(`Detention Baseline`, `Detention 1YR`, `Detention 2YR`, `Detention 3YR`, `Detention 4YR`, `Detention 5YR`, `Detention 6YR`, `Detention 7YR`) %>%
+  gg_miss_var(show_pct = TRUE) + labs(title = "Proportion of missing data for detention/suspension at each wave") + theme_brand()
+
+ed_plot %>%
+  select(`Detention Baseline`, `Detention 1YR`, `Detention 2YR`, `Detention 3YR`, `Detention 4YR`, `Detention 5YR`, `Detention 6YR`, `Detention 7YR`) %>%
+  vis_miss(cluster = TRUE, show_perc = FALSE) +
+  scale_fill_manual(
+    values = theme_colors[c(5, 19)],
+    labels = c("Present", "Missing"),
+    name = ""
+  ) +
+  theme_brand()
+```
+
+```{r miss-suspenison-patterns, fig.width=10, fig.height=8, message=FALSE}
+ed_plot %>%
+  select(`Detention Baseline`, `Detention 1YR`, `Detention 2YR`, `Detention 3YR`, `Detention 4YR`, `Detention 5YR`, `Detention 6YR`, `Detention 7YR`, race_ethnicity) %>%
+  gg_miss_var(show_pct = TRUE, facet = race_ethnicity) + labs(title = "Proportion of missing data for detention/suspension at each wave by ethnoracial identity") + theme_brand()
+
+ed_plot %>% 
+  select(`Detention Baseline`, `Detention 1YR`, `Detention 2YR`, `Detention 3YR`, `Detention 4YR`, `Detention 5YR`, `Detention 6YR`, `Detention 7YR`, race_ethnicity) %>%
+  gg_miss_fct(race_ethnicity) +
+  scale_fill_gradientn(
+    guide = "colorbar",
+    name = "% Miss",
+    colors = theme_colors[c(1:10)]
+  ) +
+  ylab("Variable") +
+  xlab("Ethno-racial identity") +
+  theme_brand()
+```
+
+```{r miss-suspenison-by-demo, message=FALSE}
+ed_plot %>% 
+  select(`Detention Baseline`, `Detention 1YR`, `Detention 2YR`, `Detention 3YR`, `Detention 4YR`, `Detention 5YR`, `Detention 6YR`, `Detention 7YR`, demo_sex_v2) %>%
+  gg_miss_fct(demo_sex_v2) +
+  scale_fill_gradientn(
+    guide = "colorbar",
+    name = "% Miss",
+    colors = theme_colors[c(1:10)]
+  ) +
+  ylab("Variable") +
+  xlab("Sex") +
+  theme_brand()
+
+ed_plot %>% 
+  select(`Detention Baseline`, `Detention 1YR`, `Detention 2YR`, `Detention 3YR`, `Detention 4YR`, `Detention 5YR`, `Detention 6YR`, `Detention 7YR`, income_bracket) %>%
+  gg_miss_fct(income_bracket) +
+  scale_fill_gradientn(
+    guide = "colorbar",
+    name = "% Miss",
+    colors = theme_colors[c(1:10)]
+  ) +
+  ylab("Variable") +
+  xlab("Parental income") +
+  theme_brand()
+```
+
+------------------------------------------------------------------------
+
+## Step 9: Propensity Score Matching -- White vs. Black+Hispanic
+
+GOAL: Create a matched sample where White and minoritized children are comparable on confounding variables (SES, school type, etc.) so that any difference in suspension rates reflects race, not background differences.
+
+TREATMENT GROUP: White (race_ethnicity_recode = 1)
+
+CONTROL GROUP: Black + Hispanic (race_ethnicity_recode = 0)
+
+MATCHING VARIABLES: marital status, parental education, income, secondary caregiver, school setting, urban/rural, sex, age, CBCL externalizing T-score (behavior problems at baseline)
+
+```{r psm-wb-his-prep}
+# ============================================================
+# PROPENSITY SCORE MATCHING: WHITE vs. BLACK + HISPANIC
+# ============================================================
+
+# Recode race into binary treatment indicator
+filtered_df_baseline_ed_recode <- filtered_df_baseline_ed %>%
+  mutate(
+    race_ethnicity_recode = case_when(
+      race_ethnicity == 2                ~ 1,   # White = treated
+      race_ethnicity %in% c(1, 3, 5, 6)  ~ 0,   # Black/Hispanic = control
+      TRUE                               ~ NA_real_
+    )
+  ) %>%
+  filter(!is.na(race_ethnicity_recode))   # Drop Asian and Other groups
+
+# Select only variables needed for matching, drop rows with any missing values
+prop_subset_data <- filtered_df_baseline_ed_recode %>%
+  select(
+    src_subject_id,
+    site,                    # Data collection site
+    demo_brthdat_v2,         # Age
+    demo_sex_v2,             # Sex
+    ledsch_seda_d_urban,     # Urban/rural
+    kbi_p_c_school_setting,  # School type
+    crpbi_caregiver1_y,      # Secondary caregiver support
+    income_bracket,          # Household income
+    parental_ed_bracket,     # Parental education (continuous)
+    marital_status_bracket,  # Marital status
+    race_ethnicity_recode,   # Binary race indicator (what we match on)
+    race_ethnicity,          # Original race code (kept for reference)
+    cbcl_scr_syn_external_t  # CBCL externalizing T-score (behavior control)
+  ) %>%
+  na.omit()
+
+cat("White participants (treated):",   sum(prop_subset_data$race_ethnicity_recode == 1), "\n")
+cat("Black+Hispanic (control):",       sum(prop_subset_data$race_ethnicity_recode == 0), "\n")
+```
+
+Define the matching formula (variables to match on) and perform nearest-neighbor 1:1 matching with a caliper of 0.2. `caliper = 0.2` means matches must be within 0.2 standard deviations of propensity score -- prevents poor/distant matches
+
+```{r psm-wb-his-match}
+matching_formula <- race_ethnicity_recode ~
+  marital_status_bracket + parental_ed_bracket + income_bracket +
+  crpbi_caregiver1_y + kbi_p_c_school_setting + ledsch_seda_d_urban +
+  demo_sex_v2 + demo_brthdat_v2 + cbcl_scr_syn_external_t
+
+matched <- matchit(
+  matching_formula,
+  data    = prop_subset_data,
+  method  = "nearest",
+  ratio   = 1,
+  caliper = 0.2
+)
+summary(matched)
+```
+
+Check the propensity score balance.
+
+BEFORE matching: the two groups may have very different propensity score distributions (curves don't overlap much).
+
+AFTER matching: the curves should overlap closely, showing the groups are now comparable on measured confounders.
+
+```{r psm-wb-his-plot}
+# ============================================================
+# KERNEL DENSITY PLOTS: CHECK PROPENSITY SCORE BALANCE
+# ============================================================
+
+# Calculate propensity scores for all participants (before matching)
+prop_subset_data <- prop_subset_data %>%
+  mutate(
+    propensity_score = predict(
+      glm(matching_formula, family = binomial, data = .),
+      type = "response"
+    )
+  )
+
+matched_data <- match.data(matched)   # Extract the matched sample
+
+# Plot BEFORE matching
+before_matching_plot <- ggplot(
+  prop_subset_data,
+  aes(x = propensity_score, fill = as.factor(race_ethnicity_recode))
+) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Kernel Density Plot Before Matching",
+       x = "Propensity Score", y = "Density", fill = "Group") +
+  scale_fill_manual(values = c("#CC4E6A", "#3C4E97"),
+                    labels = c("Minoritized (Control)", "White (Treated)")) +
+  theme_brand()
+
+ggsave("output/kernel_density_before_matching.png",
+       before_matching_plot, width = 8, height = 6)
+
+# Plot AFTER matching
+after_matching_plot <- ggplot(
+  matched_data,
+  aes(x = distance, fill = as.factor(race_ethnicity_recode))
+) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Kernel Density Plot After Matching",
+       x = "Propensity Score", y = "Density", fill = "Group") +
+  scale_fill_manual(values = c("#CC4E6A", "#3C4E97"),
+                    labels = c("Minoritized (Control)", "White (Treated)")) +
+  theme_brand()
+
+ggsave("output/kernel_density_after_matching.png",
+       after_matching_plot, width = 8, height = 6)
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Plot balance statistics
+love_plot_after <- cobalt::love.plot(matched, binary = "std", sample.names = c("Unmatched", "Matched")) + 
+  scale_y_discrete(labels = c("distance" = "Distance", "marital_status_bracket_1" = "Married/Living Together", "marital_status_bracket_2" = "Separated/Divorced/Widowed", "marital_status_bracket_3" = "Never Married", "parental_ed_bracket" = "Partner Educational Attainment", "income_bracket" = "Income Bracket", "crpbi_caregiver1_y" = "Additional Caregiver", "kbi_p_c_school_setting" = "School Setting", "ledsch_seda_d_urban_1" = "Urban Locale", "ledsch_seda_d_urban_2" = "Urbanised Clusters", "ledsch_seda_d_urban_3" = "Rural Locale", "demo_sex_v2_2" = "Sex", "demo_brthdat_v2" = "Age", "cbcl_scr_syn_external_t" = "Externalizing T-score")) +
+  theme_brand()
+
+class(matched_data$parental_ed_bracket)
+class(matched_data$ledsch_seda_d_urban)
+
+love_plot_after
+
+ggsave("output/love.plot_after_matching.png",
+       love_plot_after, width = 8, height = 6)
+```
+
+```{r, message=FALSE, warning=FALSE, fig.width=10, fig.height=12}
+cowplot::plot_grid(before_matching_plot, after_matching_plot, nrow =2)
+```
+
+------------------------------------------------------------------------
+
+## Step 10: Build Longitudinal Outcome Wide Datasets
+
+We need wide-format datasets for four outcomes:
+
+1\. Depression T-scores (cbcl_scr_dsm5_depress_t) -- continuous
+
+2\. Substance use (tlfb_cal_scr_tot_su_ud) -- continuous
+
+3\. Academic grades (grade_gpa) -- converted letter -\> GPA
+
+4\. Internalizing T-scores (cbcl_scr_syn_internal_t) -- continuous
+
+Each uses the `pivot_wide()` function defined at the top of this document.
+
+```{r build-outcome-datasets}
+# ============================================================
+# PIVOT OUTCOME VARIABLES TO WIDE FORMAT
+# ============================================================
+
+# 1. Depression T-scores across all timepoints
+depression      <- cbcl[, c("src_subject_id", "eventname", "cbcl_scr_dsm5_depress_t")]
+depression_wide <- pivot_wide(depression, "cbcl_scr_dsm5_depress_t")
+
+# 2. Substance use across all timepoints
+substance      <- su_y_tlfb[, c("src_subject_id", "eventname", "tlfb_cal_scr_tot_su_ud")]
+substance_wide <- pivot_wide(substance, "tlfb_cal_scr_tot_su_ud")
+
+# Binary "ever used any substance" indicator
+substance_wide <- substance_wide %>%
+  mutate(
+    ever_used_substance = ifelse(
+      rowSums(select(., starts_with("tlfb_cal_scr_tot_su_ud_")), na.rm = TRUE) > 0,
+      1, 0
+    )
+  )
+
+# 3. Academic grades: convert letter grade codes to GPA-equivalent numeric values
+# Using the lower boundary for each grade range
+grade <- ce_p_sag[, c("src_subject_id", "eventname", "sag_grade_type")]
+grade <- grade %>%
+  mutate(
+    grade_gpa = case_when(
+      sag_grade_type == 1  ~ 4.0,  # A+
+      sag_grade_type == 2  ~ 3.7,  # A
+      sag_grade_type == 3  ~ 3.5,  # A-
+      sag_grade_type == 4  ~ 3.3,  # B+
+      sag_grade_type == 5  ~ 3.0,  # B
+      sag_grade_type == 6  ~ 2.7,  # B-
+      sag_grade_type == 7  ~ 2.3,  # C+
+      sag_grade_type == 8  ~ 2.0,  # C
+      sag_grade_type == 9  ~ 1.7,  # C-
+      sag_grade_type == 10 ~ 1.3,  # D+
+      sag_grade_type == 11 ~ 1.0,  # D
+      sag_grade_type == 12 ~ 0.0,  # F
+      TRUE                 ~ NA_real_
+    )
+  )
+grade_wide <- pivot_wide(grade, "grade_gpa")
+
+# 4. Internalizing T-scores across all timepoints
+internal_t      <- cbcl[, c("src_subject_id", "eventname", "cbcl_scr_syn_internal_t")]
+internal_t_wide <- pivot_wide(internal_t, "cbcl_scr_syn_internal_t")
+```
+
+------------------------------------------------------------------------
+
+## Step 11: Finalize Matched Dataset -- White vs. Black+Hispanic
+
+Starting from the matched participants, we join:
+
+\- Suspension data (susp_wide)
+
+\- Depression scores (depression_wide)
+
+\- Substance use (substance_wide)
+
+\- Grades (grade_wide)
+
+Then save as a CSV.
+
+```{r finalize-matched-wb-his}
+# ============================================================
+# MERGE ALL OUTCOME DATASETS ONTO THE MATCHED SAMPLE
+# ============================================================
+
+merged_data_sus <- susp_wide %>%
+  filter(src_subject_id %in% matched_data$src_subject_id) %>%
+  left_join(matched_data, by = "src_subject_id")
+
+merged_data_depression_sus <- depression_wide %>%
+  filter(src_subject_id %in% merged_data_sus$src_subject_id) %>%
+  left_join(merged_data_sus, by = "src_subject_id")
+
+merged_data_depression_sus_su <- merged_data_depression_sus %>%
+  left_join(substance_wide, by = "src_subject_id")
+
+merged_data_depression_sus_su_grade <- merged_data_depression_sus_su %>%
+  left_join(grade_wide, by = "src_subject_id")
+
+# Remove matching-specific columns before saving
+matched_data_raw <- merged_data_depression_sus_su_grade %>%
+  select(-propensity_score, -distance, -weights, -subclass)
+
+write.csv(matched_data_raw,
+          "data/matched_data_raw.csv",
+          row.names = FALSE)
+cat("Saved: output/matched_data_raw.csv\n")
+
+# ============================================================
+# PRE-MATCH DATASET (full unmatched sample)
+# Used for sensitivity analyses comparing matched vs. unmatched results
+# ============================================================
+
+prematch_depression_sus <- depression_wide %>%
+  filter(src_subject_id %in% filtered_df_baseline_ed_recode$src_subject_id) %>%
+  left_join(filtered_df_baseline_ed_recode, by = "src_subject_id")
+
+prematch_depression_sus_su <- prematch_depression_sus %>%
+  left_join(substance_wide, by = "src_subject_id")
+
+prematch_depression_sus_su_grade <- prematch_depression_sus_su %>%
+  left_join(grade_wide, by = "src_subject_id")
+
+prematch_data_raw <- prematch_depression_sus_su_grade %>%
+  left_join(internal_t_wide, by = "src_subject_id")
+
+write.csv(prematch_data_raw,
+          "data/prematch_data_raw.csv",
+          row.names = FALSE)
+cat("Saved: prematch_data_raw.csv\n")
+```
+
+------------------------------------------------------------------------
+
+## Step 12: Propensity Score Matching -- White vs. Black
+
+Same approach as Step 9, but narrowing to White vs. Black children. `ratio = 4` means up to 4 White children matched per Black child (used because there are many more White participants).
+
+```{r psm-wb-prep}
+# ============================================================
+# PROPENSITY SCORE MATCHING: WHITE vs. BLACK ONLY
+# ============================================================
+
+WB_baseline_ed_recode <- filtered_df_baseline_ed %>%
+  mutate(
+    race_ethnicity_recode = case_when(
+      race_ethnicity == 2           ~ 0,   # White = control (reference)
+      race_ethnicity %in% c(3, 6)   ~ 1,   # Black / Multiracial Black = treated
+      TRUE                          ~ NA_real_
+    )
+  ) %>%
+  filter(!is.na(race_ethnicity_recode))
+
+WB_prop_subset_data <- WB_baseline_ed_recode %>%
+  select(
+    src_subject_id, site, demo_brthdat_v2, demo_sex_v2, ledsch_seda_d_urban,
+    kbi_p_c_school_setting, crpbi_caregiver1_y, income_bracket,
+    parental_ed_bracket, marital_status_bracket,
+    race_ethnicity_recode, race_ethnicity,
+    cbcl_scr_syn_external_t, cbcl_scr_syn_rulebreak_t #cbcl_scr_syn_rulebreak_sum
+  ) %>%
+  na.omit()
+
+cat("Black participants (treated):", sum(WB_prop_subset_data$race_ethnicity_recode == 1), "\n")
+cat("White participants (control):", sum(WB_prop_subset_data$race_ethnicity_recode == 0), "\n")
+
+matching_formula <- race_ethnicity_recode ~
+  marital_status_bracket + parental_ed_bracket + income_bracket +
+  crpbi_caregiver1_y + kbi_p_c_school_setting + ledsch_seda_d_urban +
+  demo_sex_v2 + demo_brthdat_v2 + cbcl_scr_syn_external_t
+
+WB_matched <- matchit(
+  matching_formula,
+  data    = WB_prop_subset_data,
+  method  = "nearest",
+  ratio   = 4,
+  caliper = 0.2
+)
+summary(WB_matched)
+```
+
+```{r psm-wb-plot}
+WB_prop_subset_data <- WB_prop_subset_data %>%
+  mutate(
+    propensity_score = predict(
+      glm(matching_formula, family = binomial, data = .),
+      type = "response"
+    )
+  )
+
+WB_matched_data <- match.data(WB_matched)
+
+WB_before_matching_plot <- ggplot(
+  WB_prop_subset_data,
+  aes(x = propensity_score, fill = as.factor(race_ethnicity_recode))
+) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Kernel Density Plot Before Matching (White vs. Black)",
+       x = "Propensity Score", y = "Density", fill = "Group") +
+  scale_fill_manual(values = c("#CC4E6A", "#3C4E97"),
+                    labels = c("White", "Black / Multiracial Black")) +
+  theme_brand()
+
+ggsave("output/WB_kernel_density_before_matching.png",
+       WB_before_matching_plot, width = 8, height = 6)
+
+WB_after_matching_plot <- ggplot(
+  WB_matched_data,
+  aes(x = distance, fill = as.factor(race_ethnicity_recode))
+) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Kernel Density Plot After Matching (White vs. Black)",
+       x = "Propensity Score", y = "Density", fill = "Group") +
+  scale_fill_manual(values = c("#CC4E6A", "#3C4E97"),
+                    labels = c("White", "Black / Multiracial Black")) +
+  theme_brand()
+
+ggsave("output/WB_kernel_density_after_matching.png",
+       WB_after_matching_plot, width = 8, height = 6)
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Plot balance statistics
+WB_love_plot <- cobalt::love.plot(WB_matched, binary = "std", sample.names = c("Unmatched", "Matched")) + 
+    scale_y_discrete(labels = c("distance" = "Distance", "marital_status_bracket_1" = "Married/Living Together", "marital_status_bracket_2" = "Separated/Divorced/Widowed", "marital_status_bracket_3" = "Never Married", "parental_ed_bracket" = "Partner Educational Attainment", "income_bracket" = "Income Bracket", "crpbi_caregiver1_y" = "Additional Caregiver", "kbi_p_c_school_setting" = "School Setting", "ledsch_seda_d_urban_1" = "Urban Locale", "ledsch_seda_d_urban_2" = "Urbanised Clusters", "ledsch_seda_d_urban_3" = "Rural Locale", "demo_sex_v2_2" = "Sex", "demo_brthdat_v2" = "Age", "cbcl_scr_syn_external_t" = "Externalizing T-score")) +
+  theme_brand()
+
+ggsave("output/WB_love.plot_after_matching.png",
+       WB_love_plot, width = 8, height = 6)
+```
+
+```{r, message=FALSE, warning=FALSE, fig.width=10, fig.height=14}
+cowplot::plot_grid(WB_before_matching_plot, WB_after_matching_plot, WB_love_plot, nrow = 3)
+
+WB_PSM <- cowplot::plot_grid(WB_before_matching_plot, WB_after_matching_plot, WB_love_plot, nrow = 3)
+
+ggsave("output/WB_PSM.png",
+       WB_PSM, width = 6, height = 9)
+```
+
+Merge and save matched dataset for White vs. Black comparison.
+
+```{r finalize-matched-wb}
+WB_merged_data_sus <- susp_wide %>%
+  filter(src_subject_id %in% WB_matched_data$src_subject_id) %>%
+  left_join(WB_matched_data, by = "src_subject_id")
+
+WB_merged_data_depression_sus <- depression_wide %>%
+  filter(src_subject_id %in% WB_merged_data_sus$src_subject_id) %>%
+  left_join(WB_merged_data_sus, by = "src_subject_id")
+
+WB_merged_data_depression_sus_su <- WB_merged_data_depression_sus %>%
+  left_join(substance_wide, by = "src_subject_id")
+
+WB_merged_data_depression_sus_su_grade <- WB_merged_data_depression_sus_su %>%
+  left_join(grade_wide, by = "src_subject_id")
+
+WB_matched_data_raw <- WB_merged_data_depression_sus_su_grade %>%
+  left_join(internal_t_wide, by = "src_subject_id") %>%
+  select(-propensity_score, -distance, -weights, -subclass)
+
+write.csv(WB_matched_data_raw,
+          "data/WB_matched_data_raw.csv",
+          row.names = FALSE)
+cat("Saved: WB_matched_data_raw.csv\n")
+
+# Pre-match dataset for White vs. Black
+WB_prematch_data_raw <- depression_wide %>%
+  filter(src_subject_id %in% WB_baseline_ed_recode$src_subject_id) %>%
+  left_join(WB_baseline_ed_recode, by = "src_subject_id") %>%
+  left_join(substance_wide,  by = "src_subject_id") %>%
+  left_join(grade_wide,      by = "src_subject_id") %>%
+  left_join(tabacco_wide,    by = "src_subject_id") %>%
+  left_join(internal_t_wide, by = "src_subject_id")
+
+write.csv(WB_prematch_data_raw,
+          "data/WB_prematch_data_raw.csv",
+          row.names = FALSE)
+cat("Saved: WB_prematch_data_raw.csv\n")
+```
+
+
+------------------------------------------------------------------------
+
+## Step 13: Propensity Score Matching -- White vs. Hispanic
+
+Same approach as Steps 9 and 12, now for White vs. Hispanic children.
+
+```{r psm-wh-prep}
+# ============================================================
+# PROPENSITY SCORE MATCHING: WHITE vs. HISPANIC ONLY
+# ============================================================
+
+WH_baseline_ed_recode <- filtered_df_baseline_ed %>%
+  mutate(
+    race_ethnicity_recode = case_when(
+      race_ethnicity == 2           ~ 0,   # White = control
+      race_ethnicity %in% c(1, 5)   ~ 1,   # Hispanic / Multiracial Hispanic = treated
+      TRUE                          ~ NA_real_
+    )
+  ) %>%
+  filter(!is.na(race_ethnicity_recode))
+
+WH_prop_subset_data <- WH_baseline_ed_recode %>%
+  select(
+    src_subject_id, site, demo_brthdat_v2, demo_sex_v2, ledsch_seda_d_urban,
+    kbi_p_c_school_setting, crpbi_caregiver1_y, income_bracket,
+    parental_ed_bracket, marital_status_bracket,
+    race_ethnicity_recode, race_ethnicity,
+    cbcl_scr_syn_external_t, cbcl_scr_syn_rulebreak_t #cbcl_scr_syn_rulebreak_sum
+  ) %>%
+  na.omit()
+
+cat("White participants (control):",    sum(WH_prop_subset_data$race_ethnicity_recode == 0), "\n")
+cat("Hispanic participants (treated):", sum(WH_prop_subset_data$race_ethnicity_recode == 1), "\n")
+
+matching_formula <- race_ethnicity_recode ~
+  marital_status_bracket + parental_ed_bracket + income_bracket +
+  crpbi_caregiver1_y + kbi_p_c_school_setting + ledsch_seda_d_urban +
+  demo_sex_v2 + demo_brthdat_v2 + cbcl_scr_syn_external_t
+
+WH_matched <- matchit(
+  matching_formula,
+  data    = WH_prop_subset_data,
+  method  = "nearest",
+  ratio   = 4,
+  caliper = 0.2
+)
+summary(WH_matched)
+```
+
+```{r psm-wh-plot}
+WH_prop_subset_data <- WH_prop_subset_data %>%
+  mutate(
+    propensity_score = predict(
+      glm(matching_formula, family = binomial, data = .),
+      type = "response"
+    )
+  )
+
+WH_matched_data <- match.data(WH_matched)
+
+WH_before_matching_plot <- ggplot(
+  WH_prop_subset_data,
+  aes(x = propensity_score, fill = as.factor(race_ethnicity_recode))
+) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Kernel Density Plot Before Matching (White vs. Hispanic)",
+       x = "Propensity Score", y = "Density", fill = "Group") +
+  scale_fill_manual(values = c("#CC4E6A", "#3C4E97"), labels = c("White", "Latine")) +
+  theme_brand()
+
+ggsave("output/WH_kernel_density_before_matching.png",
+       WH_before_matching_plot, width = 8, height = 6)
+
+WH_after_matching_plot <- ggplot(
+  WH_matched_data,
+  aes(x = distance, fill = as.factor(race_ethnicity_recode))
+) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Kernel Density Plot After Matching (White vs. Hispanic)",
+       x = "Propensity Score", y = "Density", fill = "Group") +
+  scale_fill_manual(values = c("#CC4E6A", "#3C4E97"), labels = c("White", "Latine")) +
+  theme_brand()
+
+ggsave("output/WH_kernel_density_after_matching.png",
+       WH_after_matching_plot, width = 8, height = 6)
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Plot balance statistics
+WH_love_plot <- cobalt::love.plot(WH_matched, binary = "std", sample.names = c("Unmatched", "Matched")) + 
+    scale_y_discrete(labels = c("distance" = "Distance", "marital_status_bracket_1" = "Married/Living Together", "marital_status_bracket_2" = "Separated/Divorced/Widowed", "marital_status_bracket_3" = "Never Married", "parental_ed_bracket" = "Partner Educational Attainment", "income_bracket" = "Income Bracket", "crpbi_caregiver1_y" = "Additional Caregiver", "kbi_p_c_school_setting" = "School Setting", "ledsch_seda_d_urban_1" = "Urban Locale", "ledsch_seda_d_urban_2" = "Urbanised Clusters", "ledsch_seda_d_urban_3" = "Rural Locale", "demo_sex_v2_2" = "Sex", "demo_brthdat_v2" = "Age", "cbcl_scr_syn_external_t" = "Externalizing T-score")) +
+  theme_brand()
+
+ggsave("output/WH_love.plot_after_matching.png",
+       WH_love_plot, width = 8, height = 6)
+```
+
+```{r, message=FALSE, warning=FALSE, fig.width=10, fig.height=14}
+cowplot::plot_grid(WH_before_matching_plot, WH_after_matching_plot, WH_love_plot, nrow = 3)
+
+WH_PSM <- cowplot::plot_grid(WH_before_matching_plot, WH_after_matching_plot, WH_love_plot, nrow = 3)
+
+ggsave("output/WH_PSM.png",
+       WH_PSM, width = 6, height = 9)
+```
+
+Merge and save matched dataset for White vs. Hispanic comparison.
+
+```{r finalize-matched-wh}
+WH_merged_data_sus <- susp_wide %>%
+  filter(src_subject_id %in% WH_matched_data$src_subject_id) %>%
+  left_join(WH_matched_data, by = "src_subject_id")
+
+WH_merged_data_depression_sus <- depression_wide %>%
+  filter(src_subject_id %in% WH_merged_data_sus$src_subject_id) %>%
+  left_join(WH_merged_data_sus, by = "src_subject_id")
+
+WH_matched_data_raw <- WH_merged_data_depression_sus %>%
+  left_join(substance_wide, by = "src_subject_id") %>%
+  left_join(grade_wide,     by = "src_subject_id") %>%
+  select(-propensity_score, -distance, -weights, -subclass)
+
+write.csv(WH_matched_data_raw,
+          "data/WH_matched_data_raw.csv",
+          row.names = FALSE)
+cat("Saved: WH_matched_data_raw.csv\n")
+
+# Pre-match dataset for White vs. Hispanic
+WH_prematch_data_raw <- depression_wide %>%
+  filter(src_subject_id %in% WH_baseline_ed_recode$src_subject_id) %>%
+  left_join(WH_baseline_ed_recode, by = "src_subject_id") %>%
+  left_join(substance_wide, by = "src_subject_id") %>%
+  left_join(grade_wide,     by = "src_subject_id")
+
+write.csv(WH_prematch_data_raw,
+          "data/WH_prematch_data_raw.csv",
+          row.names = FALSE)
+cat("Saved:WH_prematch_data_raw.csv\n")
+
+cat("White participants (control):",    sum(WH_prematch_data_raw$race_ethnicity_recode == 0), "\n")
+cat("Hispanic participants (treated):", sum(WH_prematch_data_raw$race_ethnicity_recode == 1), "\n")
+
+```
+
+
+------------------------------------------------------------------------
+
+# Descriptives Statistics
+
+## Participant Characteristics -- Table 1
+
+Summarizes participant characteristics for the overall sample.
+
+::: callout-note
+`render.missing = NULL` hides the "missing" row from the table.
+:::
+
+```{r table1-overall}
+# ============================================================
+# TABLE 1: FULL SAMPLE DESCRIPTIVE STATISTICS
+# ============================================================
+
+table_1 <- table1(
+  ~ demo_brthdat_v2 + demo_sex_v2 + race_ethnicity + ledsch_seda_d_urban +
+    kbi_p_c_school_setting + crpbi_caregiver1_y + parental_ed_bracket + income_bracket +
+    marital_status_bracket + cbcl_scr_syn_external_t + cbcl_scr_dsm5_depress_t +
+    cbcl_scr_syn_rulebreak_t + ed_det_susp_baseline_3,
+  data = filtered_df_baseline_recoded,
+  caption = "Sample Characteristics"
+  #render.missing = NULL
+)
+table_1
+```
+
+We create separate Table 1s for White, Black, and Hispanic subgroups to show how sample characteristics differ across groups.
+
+```{r table1-by-race}
+# ============================================================
+# TABLES 2-4: DESCRIPTIVE STATISTICS STRATIFIED BY RACE
+# ============================================================
+
+# --- White participants only ---
+filtered_df_baseline_recoded_W <- filtered_df_baseline_recoded %>%
+  filter(race_ethnicity == "White")
+
+table_2 <- table1(
+  ~ demo_brthdat_v2 + demo_sex_v2 + ledsch_seda_d_urban +
+    kbi_p_c_school_setting + crpbi_caregiver1_y + parental_ed_bracket + income_bracket +
+    marital_status_bracket + cbcl_scr_syn_external_t + cbcl_scr_dsm5_depress_t +
+    cbcl_scr_syn_rulebreak_t + ed_det_susp_baseline_3,
+  data = filtered_df_baseline_recoded_W,
+  caption = "Characteristics: White Participants"
+  #render.missing = NULL
+)
+table_2
+
+# --- Black participants (including Multiracial Black) ---
+filtered_df_baseline_recoded_B <- filtered_df_baseline_recoded %>%
+  filter(as.numeric(race_ethnicity) %in% c(3, 6))
+
+table_3 <- table1(
+  ~ demo_brthdat_v2 + demo_sex_v2 + ledsch_seda_d_urban +
+    kbi_p_c_school_setting + crpbi_caregiver1_y + parental_ed_bracket + income_bracket +
+    marital_status_bracket + cbcl_scr_syn_external_t + cbcl_scr_dsm5_depress_t +
+    cbcl_scr_syn_rulebreak_t  + ed_det_susp_baseline_3,
+  data = filtered_df_baseline_recoded_B,
+  caption = "Characteristics: Black Participants"
+  #render.missing = NULL
+)
+table_3
+
+# --- Hispanic participants (including Multiracial Hispanic) ---
+filtered_df_baseline_recoded_H <- filtered_df_baseline_recoded %>%
+  filter(as.numeric(race_ethnicity) %in% c(1, 5))
+
+table_4 <- table1(
+  ~ demo_brthdat_v2 + demo_sex_v2 + ledsch_seda_d_urban +
+    kbi_p_c_school_setting + crpbi_caregiver1_y + parental_ed_bracket + income_bracket +
+    marital_status_bracket + cbcl_scr_syn_external_t + cbcl_scr_dsm5_depress_t +
+    cbcl_scr_syn_rulebreak_t +  ed_det_susp_baseline_3,
+  data = filtered_df_baseline_recoded_H,
+  caption = "Characteristics: Hispanic Participants"
+  #render.missing = NULL
+)
+table_4
+```
+
+Convert the table objects to a flextable, then saves as .docx.
+
+```{r save-table1}
+# ============================================================
+# SAVE TABLE'S TO A WORD DOCUMENT
+# ============================================================
+
+# table 1 (overall)
+table_flex <- flextable(as.data.frame(table_1))
+
+save_as_docx(
+  `Table 1` = table_flex,
+  path = "output/Table1.docx")
+cat("Table 1 saved to: output/Table1.docx\n")
+
+# table 2 (white)
+table_flex2 <- flextable(as.data.frame(table_2))
+
+save_as_docx(
+  `Table 2` = table_flex2,
+  path = "output/Table2.docx")
+cat("Table 2 saved to: output/Table2.docx\n")
+
+# table 3 (black)
+table_flex3 <- flextable(as.data.frame(table_3))
+
+save_as_docx(
+  `Table 3` = table_flex3,
+  path = "output/Table3.docx")
+cat("Table 3 saved to: output/Table3.docx\n")
+
+# table 4 (hispanic)
+table_flex4 <- flextable(as.data.frame(table_4))
+
+save_as_docx(
+  `Table 4` = table_flex4,
+  path = "output/Table4.docx")
+cat("Table 4 saved to: output/Table4.docx\n")
+```
+
+What is the largest data collection site (reference group)
+
+```{r site-descript-baseline, fig.width=15, fig.height=10}
+filtered_df_baseline_recoded %>%
+  ggplot(aes(x = site, fill = site)) + 
+    geom_bar(color = "black") +
+    geom_text(stat = "count", aes(label = after_stat(count)), 
+              vjust = -0.5, size = 2) +
+    scale_fill_brand() +
+    labs(x = "Data Collection Site", fill = "Key") +
+    theme_brand() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+------------------------------------------------------------------------
+
+## Exclusionary Discipline Outcome (Year 3)
+
+Proportions of ED at year 3 in the White-Black matched sample
+```{r psm-wb-ed}
+WB_matched_data_raw %>%
+  mutate(race_ethnicity_recode = factor(race_ethnicity_recode, labels = c("White", "Black")),
+         `DA at Year 3` = factor(ed_det_susp_baseline_3, labels =c("No", "Yes"))) %>%
+  tbl_summary(include = `DA at Year 3`,
+              by = race_ethnicity_recode,
+              statistic = list(
+      all_continuous() ~ "{median} ({p25}, {p75})",
+      all_categorical() ~ "{n} / {N} ({p}%)"
+    ),
+  digits = all_continuous() ~ 2,
+  missing_text = "(Missing)"
+  ) %>%
+  modify_spanning_header(all_stat_cols() ~ "**Race/ethnicity**") %>%
+  add_p()
+```
+
+Proportions of ED at year 3 in the White-Hispanic matched sample
+```{r psm-wh-ed}
+WH_matched_data_raw  %>%
+  mutate(race_ethnicity_recode = factor(race_ethnicity_recode, labels = c("White", "Hispanic")),
+         `DA at Year 3` = factor(ed_det_susp_baseline_3, labels =c("No", "Yes"))) %>%
+  tbl_summary(include = `DA at Year 3`,
+              by = race_ethnicity_recode,
+              statistic = list(
+      all_continuous() ~ "{median} ({p25}, {p75})",
+      all_categorical() ~ "{n} / {N} ({p}%)"
+    ),
+  digits = all_continuous() ~ 2,
+  missing_text = "(Missing)"
+  ) %>%
+  modify_spanning_header(all_stat_cols() ~ "**Race/ethnicity**") %>%
+  add_p()
+```
+
+------------------------------------------------------------------------
+
+## Outcome Variables Across Follow-Up
+
+Clean up `abcd_all` dataset for descriptive analyses
+```{r recode-abcd-all}
+abcd_all <- abcd_all %>%
+    select(
+    src_subject_id,
+    site,                       # Data collection site
+    eventname,                  # Data collection wave
+    demo_brthdat_v2,            # Age (at visit, i.e., baseline)
+    demo_sex_v2,                # Sex (1=Male, 2=Female)
+    race_ethnicity,             # Recoded race/ethnicity
+    demo_race_a_p___11,         # Black race
+    demo_prnt_ed_v2_2yr_l,      # Parental educational attainment
+    demo_prnt_income_v2,        # Household income bracket
+    ledsch_seda_d_urban,        # Rural (1) vs. Non-rural (0)
+    kbi_p_c_school_setting,     # School type (public/private/home)
+    crpbi_caregiver1_y,         # Secondary caregiver support
+    demo_prnt_marital_v2,       # Parental marital status
+    cbcl_scr_syn_external_t,    # CBCL Externalizing T-score
+    cbcl_scr_dsm5_depress_t,    # CBCL Depression T-score
+    cbcl_scr_syn_rulebreak_t,   # CBCL Rule-Breaking T-score
+    sag_grade_type,             # Grade in school
+    kbi_p_c_det_susp_l,         # DA/ED
+    tlfb_cal_scr_tot_su_ud,     # Substance use number of days 
+   #cbcl_scr_syn_rulebreak_sum, # CBCL Rule-Breaking Sum 
+    cbcl_q28_p,                 # CBCL item 28
+    cbcl_q23_p                  # CBCL item 23
+  ) %>%
+  mutate(race_ethnicity = case_when(
+    race_ethnicity == 1                                  ~ 1, # hispanic
+    race_ethnicity == 2                                  ~ 2, # white
+    race_ethnicity == 3                                  ~ 3, # black
+    race_ethnicity == 7                                  ~ 4, # asian/pacific islander
+    race_ethnicity == 11                                 ~ 5, # multiracial + hispanic
+    race_ethnicity == 12 & demo_race_a_p___11 == 1       ~ 6, # multiracial + black
+    race_ethnicity == 12 & (demo_race_a_p___11 != 1
+                            | is.na(demo_race_a_p___11)) ~ 7, # other
+    race_ethnicity == 13                                 ~ 7, # other
+    TRUE                                                 ~ race_ethnicity
+  )) %>%
+  mutate(
+    income_bracket = case_when(
+      demo_prnt_income_v2 %in% 1:2   ~ 1,        # < $50,000
+      demo_prnt_income_v2 == 3       ~ 2,        # $50,000 - $74,999
+      demo_prnt_income_v2 == 4       ~ 3,        # $75,000 - $99,999
+      demo_prnt_income_v2 == 5       ~ 4,        # $100,000 - $199,999
+      demo_prnt_income_v2 == 6       ~ 5,        # >= $200,000
+      demo_prnt_income_v2 == 777     ~ 777,      # Refused
+      demo_prnt_income_v2 == 999     ~ 999,      # Don't know
+      TRUE                           ~ NA_real_
+    )
+  ) %>%
+  mutate(
+    parental_ed_bracket = case_when(
+      demo_prnt_ed_v2_2yr_l == 777                 ~ NA_real_, # Refused
+      demo_prnt_ed_v2_2yr_l == 999                 ~ NA_real_, # Don't know
+      TRUE                                         ~ demo_prnt_ed_v2_2yr_l
+    )
+  ) %>%
+  mutate(
+    marital_status_bracket = case_when(
+      demo_prnt_marital_v2 %in% c(1, 6)    ~ 1,        # Married or living with partner
+      demo_prnt_marital_v2 %in% c(2, 3, 4) ~ 2,        # Widowed / Divorced / Separated
+      demo_prnt_marital_v2 == 5            ~ 3,        # Never married
+      demo_prnt_marital_v2 == 777          ~ NA_real_, # Refused
+      TRUE                                 ~ NA_real_
+    )
+  ) %>% 
+    mutate(
+    kbi_p_c_det_susp_l = case_when(
+      kbi_p_c_det_susp_l == 999   ~ NA_real_,  # not sure
+      kbi_p_c_det_susp_l == 777   ~ NA_real_,  # declined to answer
+      TRUE                        ~ kbi_p_c_det_susp_l
+    )
+  )
+
+# Convert urban, marital status and caregiver to factor (categorical) type
+abcd_all$ledsch_seda_d_urban <- as.factor(abcd_all$ledsch_seda_d_urban)
+abcd_all$crpbi_caregiver1_y  <- as.factor(abcd_all$crpbi_caregiver1_y)
+filtered_df_baseline$marital_status_bracket <- as.factor(filtered_df_baseline$marital_status_bracket)
+
+# Academic grades: convert letter grade codes to GPA-equivalent numeric values
+# Using the lower boundary for each grade range
+abcd_all <- abcd_all%>%
+  mutate(
+    grade_gpa = case_when(
+      sag_grade_type == 1  ~ 4.0,  # A+
+      sag_grade_type == 2  ~ 3.7,  # A
+      sag_grade_type == 3  ~ 3.5,  # A-
+      sag_grade_type == 4  ~ 3.3,  # B+
+      sag_grade_type == 5  ~ 3.0,  # B
+      sag_grade_type == 6  ~ 2.7,  # B-
+      sag_grade_type == 7  ~ 2.3,  # C+
+      sag_grade_type == 8  ~ 2.0,  # C
+      sag_grade_type == 9  ~ 1.7,  # C-
+      sag_grade_type == 10 ~ 1.3,  # D+
+      sag_grade_type == 11 ~ 1.0,  # D
+      sag_grade_type == 12 ~ 0.0,  # F
+      TRUE                 ~ NA_real_
+    )
+  )
+
+# Create a binary variable indicating any substance use that year
+abcd_all <- abcd_all %>%
+  mutate(any_substance = ifelse(tlfb_cal_scr_tot_su_ud > 0, 1, 0))
+```
+
+```{r tbl-outcome-fu}
+abcd_all %>%
+  mutate(
+    `Depression (CBCL) t-score` = cbcl_scr_dsm5_depress_t, 
+    `Any substance use`             = any_substance,
+    `Days of substance use`     = tlfb_cal_scr_tot_su_ud,
+    `Academic grade (GPA)`      = grade_gpa,
+    Wave = factor(eventname, labels = c("Baseline", "1 Year", "2 Year", "3 Year", "4 Year", "5 Year", "6 Year", "7 Year"))
+  ) %>%
+  tbl_summary(
+    include = c(`Depression (CBCL) t-score`, `Any substance use`, `Days of substance use`, `Academic grade (GPA)`),
+    by      = Wave,
+    type    = all_continuous() ~ "continuous2", 
+    statistic = list(
+      all_continuous()  ~ c("{mean} ({sd})", "{median} ({p25}, {p75})", "{min}, {max}"),
+      all_categorical() ~ "{n} / {N} ({p}%)"
+    ),
+    digits       = all_continuous() ~ 2,
+    missing_text = "(Missing)"
+  ) %>%
+  modify_spanning_header(
+    c("stat_1", "stat_2", "stat_3", "stat_4", "stat_5", "stat_6", "stat_7") ~ "**Data Collection Wave**"
+  )
+
+# save as doc 
+abcd_all %>%
+  mutate(
+    `Depression (CBCL) t-score` = cbcl_scr_dsm5_depress_t, 
+    `Any substance use`             = any_substance,
+    `Days of substance use`     = tlfb_cal_scr_tot_su_ud,
+    `Academic grade (GPA)`      = grade_gpa,
+    Wave = factor(eventname, labels = c("Baseline", "1 Year", "2 Year", "3 Year", "4 Year", "5 Year", "6 Year", "7 Year"))
+  ) %>%
+  tbl_summary(
+    include = c(`Depression (CBCL) t-score`, `Any substance use`, `Days of substance use`, `Academic grade (GPA)`),
+    by      = Wave,
+    type    = all_continuous() ~ "continuous2", 
+    statistic = list(
+      all_continuous()  ~ c("{mean} ({sd})", "{median} ({p25}, {p75})", "{min}, {max}"),
+      all_categorical() ~ "{n} / {N} ({p}%)"
+    ),
+    digits       = all_continuous() ~ 2,
+    missing_text = "(Missing)"
+  ) %>%
+  modify_spanning_header(
+    c("stat_1", "stat_2", "stat_3", "stat_4", "stat_5", "stat_6", "stat_7") ~ "**Data Collection Wave**"
+  ) %>%
+  as_gt() %>%
+  gt::gtsave(filename = "output/outcome-across-fu.docx")
+```
+
+```{r ed-across-fu}
+abcd_all %>%
+  mutate(
+    `Disciplinary action` = kbi_p_c_det_susp_l, 
+    Wave = factor(eventname, labels = c("Baseline", "1 Year", "2 Year", "3 Year", "4 Year", "5 Year", "6 Year", "7 Year"))
+  ) %>%
+  tbl_summary(
+    include = c(`Disciplinary action`),
+    by      = Wave,
+    type    = all_continuous() ~ "continuous2", 
+    statistic = list(
+      all_continuous()  ~ c("{mean} ({sd})", "{median} ({p25}, {p75})", "{min}, {max}"),
+      all_categorical() ~ "{n} / {N} ({p}%)"
+    ),
+    digits       = all_continuous() ~ 2,
+    missing_text = "(Missing)"
+  ) %>%
+  modify_spanning_header(
+    c("stat_1", "stat_2", "stat_3", "stat_4", "stat_5", "stat_6", "stat_7") ~ "**Data Collection Wave**"
+  )
+```
+
+
+# Linear Regression Analyses
+
+## Section A: Pre-match Regressions
+
+Prematch analyses includes the whole cohort.
+
+### A1: Depression -- Pre-match (WB)
+
+OUTCOME: Depression T-score at 4-year follow-up
+
+EXPOSURE: Ever suspended by year 3 (binary: 0/1)
+
+SAMPLE: White + Black, UNMATCHED (full pre-match sample)
+
+COVARIATE: Baseline depression T-score used as a control so we're modeling [change]{.underline} in depression, not level.
+
+Four models:
+
+1.  Everyone pooled (all White + Black participants)
+
+2.  White participants only
+
+3.  Black participants only
+
+4.  Pooled model with race (is_black | is_his)
+
+EXPLORATORY: Null model with race x suspension interaction (no other covariates)
+
+```{r prematch-wb-depression-binary}
+
+# Ensure is_black indicator is set (1=Black/Multiracial Black, 0=White)
+WB_prematch_data_raw <- WB_prematch_data_raw %>%
+  mutate(is_black = ifelse(race_ethnicity %in% c(3, 6), 1, 0))
+
+# Select only the variables needed for this set of models
+regression_subset <- WB_prematch_data_raw[, c(
+  "cbcl_scr_syn_external_t",             # CBCL externalising-score (covariate)
+  "cbcl_scr_dsm5_depress_t_ses-00A",     # Baseline depression (control)
+  "cbcl_scr_dsm5_depress_t_ses-04A",     # Depression at year 4 (outcome)
+  "ed_det_susp_baseline_3",              # Ever suspended (key exposure)
+  "ed_det_susp_count",                   # Suspension count (used in ordinal models below)
+  "demo_sex_v2",
+  "crpbi_caregiver1_y",
+  "income_bracket",
+  "parental_ed_bracket",
+  "marital_status_bracket",
+  "race_ethnicity",
+  "race_ethnicity_recode",
+  "is_black",
+  "site"
+)]
+
+regression_subset <- regression_subset %>%
+  mutate(income_bracket = as.factor(income_bracket),
+         marital_status_bracket = as.factor(marital_status_bracket),
+         parental_ed_bracket = as.factor(parental_ed_bracket))
+
+# Model 1: Full pooled sample (White + Black combined), controlling for covariates
+# lm() = linear regression; missing rows are automatically dropped (listwise deletion)
+prematch_depress_model_WB <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_depress_model_WB)
+
+# Model 2: White participants only (is_black == 0)
+regression_subset_white <- regression_subset %>% filter(is_black == 0)
+
+prematch_depress_model_onlyWB <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_white
+)
+summary(prematch_depress_model_onlyWB)
+
+# Model 3: Black participants only (is_black == 1)
+regression_subset_black <- regression_subset %>% filter(is_black == 1)
+
+prematch_depress_model_onlyB <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_black
+)
+summary(prematch_depress_model_onlyB)
+
+# Model 4: Pooled model with race control
+prematch_depress_race_control_WB <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    is_black + ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_depress_race_control_WB)
+
+# Null model: Tests whether suspension effect DIFFERS by race (interaction term)
+# is_black * ed_det_susp_baseline_3 = the interaction (does race moderate the effect?)
+prematch_depress_model_WB_null <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    is_black + ed_det_susp_baseline_3 + is_black * ed_det_susp_baseline_3,
+  data = regression_subset
+)
+summary(prematch_depress_model_WB_null)
+```
+
+### A1b: Depression -- Ordinal Suspension Count (WB Pre-match)
+
+Same models as above, but using ed_det_susp_count (0, 1, or 2) instead of the binary ever-suspended variable. This tests whether MORE suspensions = worse outcomes.
+
+```{r prematch-wb-depression-ordinal}
+
+describe(regression_subset$ed_det_susp_count)
+
+# Pooled model
+prematch_depress_model_count <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_count + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_depress_model_count)
+
+# Pooled with race control
+prematch_depress_race_count <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    is_black + ed_det_susp_count + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_depress_race_count)
+
+# White only
+regression_subset_white <- regression_subset %>% filter(is_black == 0)
+prematch_depress_model_onlyW_count <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_count + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_white
+)
+summary(prematch_depress_model_onlyW_count)
+
+# Black only
+regression_subset_black <- regression_subset %>% filter(is_black == 1)
+prematch_depress_model_onlyB_count <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_count + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_black
+)
+summary(prematch_depress_model_onlyB_count)
+
+# Null model: Tests whether suspension effect DIFFERS by race (interaction term)
+prematch_depress_model_WB_count_null <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    is_black + ed_det_susp_count + is_black * ed_det_susp_count,
+  data = regression_subset
+)
+summary(prematch_depress_model_WB_count_null)
+```
+
+### A2: Depression -- Pre-match (WH)
+
+```{r prematch-wh-depression}
+# ============================================================
+# Same depression models, now for the White vs. Hispanic sample.
+# is_his = 1 for Hispanic/Multiracial Hispanic, 0 for White.
+# ============================================================
+
+WH_prematch_data_raw <- WH_prematch_data_raw %>%
+  mutate(is_his = ifelse(race_ethnicity %in% c(1, 5), 1, 0))
+
+regression_subset <- WH_prematch_data_raw[, c(
+  "cbcl_scr_syn_external_t",
+  "cbcl_scr_dsm5_depress_t_ses-00A",
+  "cbcl_scr_dsm5_depress_t_ses-04A", # Depression at year 4 (outcome)
+  "ed_det_susp_baseline_3",
+  "ed_det_susp_count",
+  "demo_sex_v2",
+  "crpbi_caregiver1_y",
+  "income_bracket",
+  "parental_ed_bracket",
+  "marital_status_bracket",
+  "race_ethnicity",
+  "race_ethnicity_recode",
+  "is_his",
+  "site"
+)]
+
+regression_subset <- regression_subset %>%
+  mutate(income_bracket = as.factor(income_bracket),
+         marital_status_bracket = as.factor(marital_status_bracket),
+         parental_ed_bracket = as.factor(parental_ed_bracket))
+
+# Pooled model (all White + Hispanic)
+prematch_depress_model_WH <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_depress_model_WH)
+
+# White only (is_his == 0)
+regression_subset_white <- regression_subset %>% filter(is_his == 0)
+prematch_depress_model_onlyWH <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_white
+)
+summary(prematch_depress_model_onlyWH)
+
+# Hispanic only (is_his == 1)
+regression_subset_his <- regression_subset %>% filter(is_his == 1)
+prematch_depress_model_onlyH <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_his
+)
+summary(prematch_depress_model_onlyH)
+
+# Pooled with race control
+prematch_depress_model_race_control_WH <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    is_his + ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_depress_model_race_control_WH)
+
+# Null model: Tests whether suspension effect DIFFERS by race (interaction term)
+prematch_depress_model_WH_null <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    is_his + ed_det_susp_baseline_3 + is_his * ed_det_susp_baseline_3,
+  data = regression_subset_his
+)
+summary(prematch_depress_model_WH_null)
+```
+
+### A3: Substance Use -- Pre-match (WB)
+
+ OUTCOME: Total substance use disorder days at 4-year follow-up
+ 
+ EXPOSURE: Ever suspended by year 3 (binary)
+ 
+ COVARIATE: Total substance use disorder at baseline used as a control
+
+```{r prematch-wb-substance}
+regression_subset <- WB_prematch_data_raw[, c(
+  "cbcl_scr_syn_external_t",         # Externalising t-score (covariate)
+  "tlfb_cal_scr_tot_su_ud_ses-00A",  # Baseline substance use (control)
+  "tlfb_cal_scr_tot_su_ud_ses-04A",  # Substance use at year 4 (outcome)
+  "ed_det_susp_baseline_3",
+  "demo_sex_v2",
+  "crpbi_caregiver1_y",
+  "income_bracket",
+  "parental_ed_bracket",
+  "marital_status_bracket",
+  "race_ethnicity",
+  "race_ethnicity_recode",
+  "is_black",
+  "site"
+)]
+
+regression_subset <- regression_subset %>%
+  mutate(income_bracket = as.factor(income_bracket),
+         marital_status_bracket = as.factor(marital_status_bracket),
+         parental_ed_bracket = as.factor(parental_ed_bracket))
+
+# Pooled model
+prematch_SU_model_WB <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_SU_model_WB)
+
+# White only
+regression_subset_white <- regression_subset %>% filter(is_black == 0)
+prematch_SU_model_onlyWB <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_white
+)
+summary(prematch_SU_model_onlyWB)
+
+# Black only
+regression_subset_black <- regression_subset %>% filter(is_black == 1)
+prematch_SU_model_onlyB <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_black
+)
+summary(prematch_SU_model_onlyB)
+
+# Pooled with race control
+prematch_SU_model_race_control_WB <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    is_black + ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_SU_model_race_control_WB)
+
+# Null model: Tests whether suspension effect DIFFERS by race (interaction term)
+prematch_SU_model_WB_null <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    is_black + ed_det_susp_baseline_3 + is_black * ed_det_susp_baseline_3,
+  data = regression_subset
+)
+summary(prematch_SU_model_WB_null)
+```
+
+### A4: Substance Use -- Pre-match (WH)
+
+```{r prematch-wh-substance}
+regression_subset <- WH_prematch_data_raw[, c(
+  "cbcl_scr_syn_external_t",         # Externalising-score (covariate)
+  "tlfb_cal_scr_tot_su_ud_ses-00A",  # Baseline substance use (control)
+  "tlfb_cal_scr_tot_su_ud_ses-04A",  # Substance use at year 4 (outcome)
+  "ed_det_susp_baseline_3",
+  "demo_sex_v2",
+  "crpbi_caregiver1_y",
+  "income_bracket",
+  "parental_ed_bracket",
+  "marital_status_bracket",
+  "race_ethnicity",
+  "race_ethnicity_recode",
+  "is_his",
+  "site"
+)]
+
+regression_subset <- regression_subset %>%
+  mutate(income_bracket = as.factor(income_bracket),
+         marital_status_bracket = as.factor(marital_status_bracket),
+         parental_ed_bracket = as.factor(parental_ed_bracket))
+
+# Pooled model
+prematch_SU_model_WH <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_SU_model_WH)
+
+# White only
+regression_subset_white <- regression_subset %>% filter(is_his == 0)
+prematch_SU_model_onlyWH <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_white
+)
+summary(prematch_SU_model_onlyWH)
+
+# Black only
+regression_subset_his <- regression_subset %>% filter(is_his == 1)
+prematch_SU_model_onlyH <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_his
+)
+summary(prematch_SU_model_onlyH)
+
+# Pooled with race control
+prematch_SU_model_race_control_WH <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    is_his + ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_SU_model_race_control_WH)
+
+# Null model: Tests whether suspension effect DIFFERS by race (interaction term)
+prematch_SU_model_WH_null <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    is_his + ed_det_susp_baseline_3 + is_his * ed_det_susp_baseline_3,
+  data = regression_subset
+)
+summary(prematch_SU_model_WH_null)
+```
+
+### A5: Academic Grades -- Pre-match (WB)
+
+OUTCOME: GPA at 4-year follow-up
+
+EXPOSURE: Ever suspended by year 3 (binary)
+
+COVARIATE: GPA at year 3 used as a control (so we model change in GPA, not absolute GPA)
+
+```{r prematch-wb-grade}
+regression_subset <- WB_prematch_data_raw[, c(
+  "cbcl_scr_syn_external_t",
+  "grade_gpa_ses-03A",  # Year 3 GPA (control)
+  "grade_gpa_ses-04A",  # Year 4 GPA (outcome)
+  "ed_det_susp_baseline_3",
+  "demo_sex_v2",
+  "crpbi_caregiver1_y",
+  "income_bracket",
+  "parental_ed_bracket",
+  "marital_status_bracket",
+  "race_ethnicity",
+  "race_ethnicity_recode",
+  "is_black",
+  "ed_det_susp_count",
+  "site"
+)]
+
+regression_subset <- regression_subset %>%
+  mutate(income_bracket = as.factor(income_bracket),
+         marital_status_bracket = as.factor(marital_status_bracket),
+         parental_ed_bracket = as.factor(parental_ed_bracket))
+
+# Pooled
+prematch_grade_model_WB <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_grade_model_WB)
+
+# White only
+regression_subset_white <- regression_subset %>% filter(is_black == 0)
+prematch_grade_model_onlyWB <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_white
+)
+summary(prematch_grade_model_onlyWB)
+
+# Black only
+regression_subset_black <- regression_subset %>% filter(is_black == 1)
+prematch_grade_model_onlyB <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_black
+)
+summary(prematch_grade_model_onlyB)
+
+# Pooled with race control
+prematch_grade_model_race_control_WB <- lm(
+  `grade_gpa_ses-04A` ~
+    is_black + ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_grade_model_race_control_WB)
+
+# Null model: Tests whether suspension effect DIFFERS by race (interaction term)
+prematch_grade_model_null_WB <- lm(
+  `grade_gpa_ses-04A` ~
+    is_black + ed_det_susp_baseline_3 + is_black * ed_det_susp_baseline_3,
+  data = regression_subset
+)
+summary(prematch_grade_model_null_WB)
+```
+
+### A6: Academic Grades -- Pre-match (WH)
+
+```{r prematch-wh-grade}
+# Same grade models for the White vs. Hispanic (pre-match) sample
+
+regression_subset <- WH_prematch_data_raw[, c(
+  "cbcl_scr_syn_external_t",
+  "grade_gpa_ses-03A",  # Year 3 GPA (control)
+  "grade_gpa_ses-04A",  # Year 4 GPA (outcome)
+  "ed_det_susp_baseline_3",
+  "demo_sex_v2",
+  "crpbi_caregiver1_y",
+  "income_bracket",
+  "parental_ed_bracket",
+  "marital_status_bracket",
+  "race_ethnicity",
+  "race_ethnicity_recode",
+  "is_his",
+  "ed_det_susp_count",
+  "site"
+)]
+
+regression_subset <- regression_subset %>%
+  mutate(income_bracket = as.factor(income_bracket),
+         marital_status_bracket = as.factor(marital_status_bracket),
+         parental_ed_bracket = as.factor(parental_ed_bracket))
+
+# Pooled
+prematch_grade_model_WH <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_grade_model_WH)
+
+# White only (is_his == 0)
+regression_subset_white <- regression_subset %>% filter(is_his == 0)
+prematch_grade_model_onlyWH <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_white
+)
+summary(prematch_grade_model_onlyWH)
+
+# Hispanic only (is_his == 1)
+regression_subset_his <- regression_subset %>% filter(is_his == 1)
+prematch_grade_model_onlyH <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset_his
+)
+summary(prematch_grade_model_onlyH)
+
+# Pooled with race control
+prematch_grade_model_race_control_WH <- lm(
+  `grade_gpa_ses-04A` ~
+    is_his + ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = regression_subset
+)
+summary(prematch_grade_model_race_control_WH)
+
+# Null model: Tests whether suspension effect DIFFERS by race (interaction term)
+prematch_grade_model_null_WH <- lm(
+  `grade_gpa_ses-04A` ~
+    is_his + ed_det_susp_baseline_3 + is_his * ed_det_susp_baseline_3,
+  data = regression_subset
+)
+summary(prematch_grade_model_null_WH)
+```
+
+## Section B: Matched Data Regressions
+
+### B1: Depression -- Matched (WB)
+
+Same depression models as Section A, but now using the **PROPENSITY-SCORE-MATCHED** sample. The matched sample has been balanced on confounders, so any remaining differences should \# better reflect the causal effect of suspension.
+
+```{r matched-wb-depression}
+
+WB_matched_data_raw <- WB_matched_data_raw %>%
+  mutate(is_black = ifelse(race_ethnicity %in% c(3, 6), 1, 0))
+
+matched_regression_subset <- WB_matched_data_raw[, c(
+  "cbcl_scr_syn_external_t",
+  "cbcl_scr_dsm5_depress_t_ses-00A",
+  "cbcl_scr_dsm5_depress_t_ses-04A",
+  "ed_det_susp_baseline_3",
+  "ed_det_susp_count",
+  "demo_sex_v2",
+  "crpbi_caregiver1_y",
+  "income_bracket",
+  "parental_ed_bracket",
+  "marital_status_bracket",
+  "race_ethnicity",
+  "race_ethnicity_recode",
+  "is_black",
+  "site"
+)]
+
+matched_regression_subset <- matched_regression_subset %>%
+  mutate(income_bracket = as.factor(income_bracket),
+         marital_status_bracket = as.factor(marital_status_bracket),
+         parental_ed_bracket = as.factor(parental_ed_bracket))
+
+# Pooled matched
+matched_depress_model_WB <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset
+)
+summary(matched_depress_model_WB)
+
+# White only (matched)
+matched_regression_subset_white <- matched_regression_subset %>% filter(is_black == 0)
+matched_depress_model_onlyWB <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_white
+)
+summary(matched_depress_model_onlyWB)
+
+# Black only (matched)
+matched_regression_subset_black <- matched_regression_subset %>% filter(is_black == 1)
+matched_depress_model_onlyB <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_black
+)
+summary(matched_depress_model_onlyB)
+
+# Pooled matched with race control
+matched_depress_model_race_control_WB <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    is_black + ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset
+)
+summary(matched_depress_model_race_control_WB)
+
+# Null model: Tests whether suspension effect DIFFERS by race (matched sample)
+matched_depress_model_WB_null <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    is_black + ed_det_susp_baseline_3 + is_black * ed_det_susp_baseline_3,
+  data = matched_regression_subset
+)
+summary(matched_depress_model_WB_null)
+```
+
+### B2: Depression -- Matched (WH)
+
+Same depression models for the White vs. Hispanic matched sample
+
+```{r matched-wh-depression}
+
+WH_matched_data_raw <- WH_matched_data_raw %>%
+  mutate(is_his = ifelse(race_ethnicity %in% c(1, 5), 1, 0))
+
+matched_regression_subset <- WH_matched_data_raw[, c(
+  "cbcl_scr_syn_external_t",
+  "cbcl_scr_dsm5_depress_t_ses-00A",
+  "cbcl_scr_dsm5_depress_t_ses-04A",
+  "ed_det_susp_baseline_3",
+  "ed_det_susp_count",
+  "demo_sex_v2",
+  "crpbi_caregiver1_y",
+  "income_bracket",
+  "parental_ed_bracket",
+  "marital_status_bracket",
+  "race_ethnicity",
+  "race_ethnicity_recode",
+  "is_his",
+  "site"
+)]
+
+matched_regression_subset <- matched_regression_subset %>%
+  mutate(income_bracket = as.factor(income_bracket),
+         marital_status_bracket = as.factor(marital_status_bracket),
+         parental_ed_bracket = as.factor(parental_ed_bracket))
+
+# Pooled
+matched_depress_model_WH <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset
+)
+summary(matched_depress_model_WH)
+
+# White only (is_his == 0)
+matched_regression_subset_white <- matched_regression_subset %>% filter(is_his == 0)
+matched_depress_model_onlyWH <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_white
+)
+summary(matched_depress_model_onlyWH)
+
+# Hispanic only (is_his == 1)
+matched_regression_subset_his <- matched_regression_subset %>% filter(is_his == 1)
+matched_depress_model_onlyH <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_his
+)
+summary(matched_depress_model_onlyH)
+
+# Pooled with race control
+matched_depress_model_race_control_WH <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    is_his + ed_det_susp_baseline_3 + `cbcl_scr_dsm5_depress_t_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset
+)
+summary(matched_depress_model_race_control_WH)
+
+# Null model: Tests whether suspension effect DIFFERS by race (matched sample)
+matched_depress_model_WH_null <- lm(
+  `cbcl_scr_dsm5_depress_t_ses-04A` ~
+    is_his + ed_det_susp_baseline_3 + is_his * ed_det_susp_baseline_3,
+  data = matched_regression_subset_his
+)
+summary(matched_depress_model_WH_null)
+```
+
+### B3: Substance Use -- Matched (WB)
+
+Substance use regression on the White vs. Black MATCHED sample
+
+```{r matched-wb-substance}
+
+matched_regression_subset <- WB_matched_data_raw[, c(
+  "cbcl_scr_syn_external_t",
+  "tlfb_cal_scr_tot_su_ud_ses-00A",
+  "tlfb_cal_scr_tot_su_ud_ses-04A",
+  "ed_det_susp_baseline_3",
+  "demo_sex_v2",
+  "crpbi_caregiver1_y",
+  "income_bracket",
+  "parental_ed_bracket",
+  "marital_status_bracket",
+  "race_ethnicity",
+  "race_ethnicity_recode",
+  "is_black",
+  "site"
+)]
+
+matched_regression_subset <- matched_regression_subset %>%
+  mutate(income_bracket = as.factor(income_bracket),
+         marital_status_bracket = as.factor(marital_status_bracket),
+         parental_ed_bracket = as.factor(parental_ed_bracket))
+
+# Pooled model
+matched_SU_model_WB <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset
+)
+summary(matched_SU_model_WB)
+
+
+# White only
+matched_regression_subset_white <- matched_regression_subset %>% filter(is_black == 0)
+matched_SU_model_onlyWB <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_white
+)
+summary(matched_SU_model_onlyWB)
+
+# Black only
+matched_regression_subset_black <- matched_regression_subset %>% filter(is_black == 1)
+matched_SU_model_onlyB <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_black
+)
+summary(matched_SU_model_onlyB)
+
+# Pooled with race control 
+matched_SU_model_race_control_WB <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    is_black + ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset
+)
+summary(matched_SU_model_race_control_WB)
+
+# Null model: Tests whether suspension effect DIFFERS by race (matched sample)
+matched_SU_model_WB_null <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    is_black + ed_det_susp_baseline_3 + is_black * ed_det_susp_baseline_3,
+  data = matched_regression_subset
+)
+summary(matched_depress_model_WB_null)
+```
+
+### B4: Substance Use -- Matched (WH)
+
+Substance use regression on the White vs. Hispanic MATCHED sample
+
+```{r matched-wh-substance}
+
+matched_regression_subset <- WH_matched_data_raw[, c(
+  "cbcl_scr_syn_external_t",
+  "tlfb_cal_scr_tot_su_ud_ses-00A",
+  "tlfb_cal_scr_tot_su_ud_ses-04A",
+  "ed_det_susp_baseline_3",
+  "demo_sex_v2",
+  "crpbi_caregiver1_y",
+  "income_bracket",
+  "parental_ed_bracket",
+  "marital_status_bracket",
+  "race_ethnicity",
+  "race_ethnicity_recode",
+  "is_his",
+  "site"
+)]
+
+matched_regression_subset <- matched_regression_subset %>%
+  mutate(income_bracket = as.factor(income_bracket),
+         marital_status_bracket = as.factor(marital_status_bracket),
+         parental_ed_bracket = as.factor(parental_ed_bracket))
+
+# Pooled model
+matched_SU_model_WH <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset
+)
+summary(matched_SU_model_WH)
+
+
+# White only
+matched_regression_subset_white <- matched_regression_subset %>% filter(is_his == 0)
+matched_SU_model_onlyWH <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_white
+)
+summary(matched_SU_model_onlyWH)
+
+# Hispanic only
+matched_regression_subset_his <- matched_regression_subset %>% filter(is_his == 1)
+matched_SU_model_onlyH <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_his
+)
+summary(matched_SU_model_onlyH)
+
+# Pooled with race control 
+matched_SU_model_race_control_WH <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    is_his + ed_det_susp_baseline_3 + `tlfb_cal_scr_tot_su_ud_ses-00A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset
+)
+summary(matched_SU_model_race_control_WH)
+
+# Null model: Tests whether suspension effect DIFFERS by race (matched sample)
+matched_SU_model_WH_null <- lm(
+  `tlfb_cal_scr_tot_su_ud_ses-04A` ~
+    is_his + ed_det_susp_baseline_3 + is_his * ed_det_susp_baseline_3,
+  data = matched_regression_subset
+)
+summary(matched_depress_model_WH_null)
+```
+
+### B5: Academic Grades -- Matched (WB)
+
+Grade regression on the White vs. Black MATCHED sample
+
+```{r matched-wb-grade}
+
+matched_regression_subset <- WB_matched_data_raw[, c(
+  "cbcl_scr_syn_external_t",
+  "grade_gpa_ses-03A",
+  "grade_gpa_ses-04A",
+  "ed_det_susp_baseline_3",
+  "demo_sex_v2",
+  "crpbi_caregiver1_y",
+  "income_bracket",
+  "parental_ed_bracket",
+  "marital_status_bracket",
+  "race_ethnicity",
+  "race_ethnicity_recode",
+  "is_black",
+  "ed_det_susp_count",
+  "site"
+)]
+
+matched_regression_subset <- matched_regression_subset %>%
+  mutate(income_bracket = as.factor(income_bracket),
+         marital_status_bracket = as.factor(marital_status_bracket),
+         parental_ed_bracket = as.factor(parental_ed_bracket))
+
+# Pooled
+matched_grade_model_WB <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset
+)
+summary(matched_grade_model_WB)
+
+# White only
+matched_regression_subset_white <- matched_regression_subset %>% filter(is_black == 0)
+matched_grade_model_onlyWB <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_white
+)
+summary(matched_grade_model_WB)
+
+# Black only
+matched_regression_subset_black <- matched_regression_subset %>% filter(is_black == 1)
+matched_grade_model_onlyB <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_black
+)
+summary(matched_grade_model_onlyB)
+
+# Pooled with race control
+matched_grade_model_race_control_WB <- lm(
+  `grade_gpa_ses-04A` ~
+    is_black + ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset
+)
+summary(matched_grade_model_race_control_WB)
+
+# Null model: Tests whether suspension effect DIFFERS by race (matched sample)
+matched_grade_model_null <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + is_black + is_black * ed_det_susp_baseline_3,
+  data = matched_regression_subset
+)
+summary(matched_grade_model_null)
+```
+
+### B6: Academic Grades -- Matched (WH)
+
+Grade regression on the White vs. Hispanic MATCHED sample
+
+```{r matched-wh-grade}
+
+matched_regression_subset <- WH_matched_data_raw[, c(
+  "cbcl_scr_syn_external_t",
+  "grade_gpa_ses-03A",
+  "grade_gpa_ses-04A",
+  "ed_det_susp_baseline_3",
+  "demo_sex_v2",
+  "crpbi_caregiver1_y",
+  "income_bracket",
+  "parental_ed_bracket",
+  "marital_status_bracket",
+  "race_ethnicity",
+  "race_ethnicity_recode",
+  "is_his",
+  "ed_det_susp_count",
+  "site"
+)]
+
+matched_regression_subset <- matched_regression_subset %>%
+  mutate(income_bracket = as.factor(income_bracket),
+         marital_status_bracket = as.factor(marital_status_bracket),
+         parental_ed_bracket = as.factor(parental_ed_bracket))
+
+sapply(matched_regression_subset, class) # check type to confirm factor/numeric assignment
+
+# Pooled
+matched_grade_model_WH <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset
+)
+summary(matched_grade_model_WH)
+
+# White only (is_his == 0)
+matched_regression_subset_white <- matched_regression_subset %>% filter(is_his == 0)
+matched_grade_model_onlyWH <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_white
+)
+summary(matched_grade_model_onlyWH)
+
+# Hispanic only (is_his == 1)
+matched_regression_subset_his <- matched_regression_subset %>% filter(is_his == 1)
+matched_grade_model_onlyH <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_his
+)
+summary(matched_grade_model_onlyH)
+
+# Pooled with race control
+matched_grade_model_race_control_WH <- lm(
+  `grade_gpa_ses-04A` ~
+    is_his + ed_det_susp_baseline_3 + `grade_gpa_ses-03A` + site +
+    demo_sex_v2 + crpbi_caregiver1_y + income_bracket +
+    parental_ed_bracket + marital_status_bracket + cbcl_scr_syn_external_t,
+  data = matched_regression_subset_his
+)
+summary(matched_grade_model_race_control_WH)
+
+# Null model: Tests whether suspension effect DIFFERS by race (matched sample)
+matched_grade_model_null <- lm(
+  `grade_gpa_ses-04A` ~
+    ed_det_susp_baseline_3 + is_his + is_his * ed_det_susp_baseline_3,
+  data = matched_regression_subset_his
+)
+summary(matched_grade_model_null)
+```
+
+------------------------------------------------------------------------
+
+## Section C: Export Regression Table to Word
+
+```{r helper-get-all-variables}
+# ============================================================
+# HELPER FUNCTION: get_all_variables()
+#
+# Collects all unique variable names (predictors) across a list
+# of models. Used to build a combined results table where each
+# row is a predictor and each column is a different model.
+# ============================================================
+get_all_variables <- function(model_list) {
+  all_vars <- unique(unlist(lapply(model_list, function(m) rownames(coef(summary(m))))))
+  return(all_vars)
+}
+
+format_coef <- function(estimate, p_value) {
+  formatted <- sprintf("%.3f", estimate)
+  if      (p_value < 0.001) formatted <- paste0(formatted, "***")
+  else if (p_value < 0.01)  formatted <- paste0(formatted, "**")
+  else if (p_value < 0.05)  formatted <- paste0(formatted, "*")
+  return(formatted)
+}
+```
+
+### C1: Depression -- Matched (WB)
+
+```{r build-depress-regression-table-wb}
+# ── Define model list ─────────────────────────────────────────────────────────
+WB_model_depress_full_sample <- list(
+  "All Participants" = prematch_depress_model_WB,
+  "White Only"       = prematch_depress_model_onlyWB,
+  "Black Only"       = prematch_depress_model_onlyB,
+  "Race-Controlled"  = prematch_depress_race_control_WB
+)
+
+WB_model_depress_full_matched <- list(
+  "All Participants" = matched_depress_model_WB,
+  "White Only"       = matched_depress_model_onlyWB,
+  "Black Only"       = matched_depress_model_onlyB,
+  "Race-Controlled"  = matched_depress_model_race_control_WB
+)
+
+# ── Shared reference levels ───────────────────────────────────────────────────
+
+reference_levels <- c(
+  "(Intercept)"                     = "N/A",
+  "is_black"                        = "Non-Black (0)",
+  "ed_det_susp_baseline_31"         = "No Suspension (0)",
+  "cbcl_scr_dsm5_depress_t_ses-00A" = "Continuous Score",
+  "demo_sex_v22"                    = "Male (1)",
+  "crpbi_caregiver1_y1"             = "Continuous Score",
+  "income_bracket2"                 = "<$50K (Reference)",
+  "income_bracket3"                 = "<$50K (Reference)",
+  "income_bracket4"                 = "<$50K (Reference)",
+  "income_bracket5"                 = "<$50K (Reference)",
+  "income_bracket777"               = "<$50K (Reference)",
+  "income_bracket999"               = "<$50K (Reference)",
+  "parental_ed_bracket2"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket3"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket4"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket5"            = "Up to HS no diploma (Reference)",
+  "marital_status_bracket2"         = "Married/Living Together (Reference)",
+  "marital_status_bracket3"         = "Married/Living Together (Reference)",
+  "siteFlorida International University"        = "Children's Hospital Los Angeles",
+  "siteLaureate Institute for Brain Research"   = "Children's Hospital Los Angeles",
+  "siteMedical University of South Carolina"    = "Children's Hospital Los Angeles",
+  "siteOregon Health & Science University"      = "Children's Hospital Los Angeles",
+  "siteSRI International"                       = "Children's Hospital Los Angeles",
+  "siteUniversity of California, Los Angeles"   = "Children's Hospital Los Angeles",
+  "siteUniversity of California, San Diego"     = "Children's Hospital Los Angeles",
+  "siteUniversity of Colorado Boulder"          = "Children's Hospital Los Angeles",
+  "siteUniversity of Florida"                   = "Children's Hospital Los Angeles",
+  "siteUniversity of Maryland, Baltimore"       = "Children's Hospital Los Angeles",
+  "siteUniversity of Michigan"                  = "Children's Hospital Los Angeles",
+  "siteUniversity of Minnesota"                 = "Children's Hospital Los Angeles",
+  "siteUniversity of Pittsburgh Medical Center" = "Children's Hospital Los Angeles",
+  "siteUniversity of Rochester"                 = "Children's Hospital Los Angeles",
+  "siteUniversity of Utah"                      = "Children's Hospital Los Angeles",
+  "siteUniversity of Vermont"                   = "Children's Hospital Los Angeles",
+  "siteUniversity of Wisconsin, Milwaukee"      = "Children's Hospital Los Angeles",
+  "siteVirginia Commonwealth University"        = "Children's Hospital Los Angeles",
+  "siteWashington University in St. Louis"      = "Children's Hospital Los Angeles",
+  "siteYale University"                         = "Children's Hospital Los Angeles"
+)
+
+# ── Core builder function ─────────────────────────────────────────────────────
+
+build_coef_table <- function(model_list, title_label) {
+  
+  all_variable_names <- get_all_variables(model_list)
+  
+  # Auto-fill any missing reference levels
+  ref_levels <- reference_levels  # copy shared reference levels
+  for (var in all_variable_names) {
+    if (!(var %in% names(ref_levels))) {
+      if      (grepl("income_bracket",         var)) ref_levels[var] <- "<$50K (Reference)"
+      else if (grepl("parental_ed_bracket",  var)) ref_levels[var] <- "Up to HS no diploma (Reference)"
+      else if (grepl("marital_status_bracket", var)) ref_levels[var] <- "Married/Living Together (Reference)"
+      else                                            ref_levels[var] <- "Reference Category"
+    }
+  }
+  
+  # Base data frame
+  all_coefs <- data.frame(
+    Variable  = all_variable_names,
+    Reference = ref_levels[all_variable_names],
+    stringsAsFactors = FALSE
+  )
+  
+  # Fill in coefficients from each model
+  for (model_name in names(model_list)) {
+    model         <- model_list[[model_name]]
+    model_summary <- summary(model)
+    coefs         <- coef(model_summary)
+    
+    all_coefs[[model_name]] <- NA
+    
+    for (i in 1:nrow(all_coefs)) {
+      var_name <- all_coefs$Variable[i]
+      if (var_name %in% rownames(coefs)) {
+        estimate <- coefs[var_name, "Estimate"]
+        p_value  <- coefs[var_name, "Pr(>|t|)"]
+        all_coefs[i, model_name] <- format_coef(estimate, p_value)
+      }
+    }
+  }
+  
+  # Build flextable
+  n_models <- length(model_list)
+  
+  ft <- flextable(all_coefs) %>%
+    add_header_row(
+      values    = c("", "", title_label),
+      colwidths = c(1, 1, n_models)
+    ) %>%
+    theme_booktabs() %>%
+    align(j = 1:2,              align = "left") %>%
+    align(j = 3:(2 + n_models), align = "center") %>%
+    width(j = 1,              width = 3.5) %>%
+    width(j = 2,              width = 2.0) %>%
+    width(j = 3:(2 + n_models), width = 1.5) %>%
+    bold(i = 1, bold = TRUE) %>%
+    add_footer_lines(values = c(
+      "* p < 0.05, ** p < 0.01, *** p < 0.001",
+      "Values show regression coefficients with significance stars",
+      "Outcome: Depression symptoms (CBCL DSM-5 T-Score) at 3-year follow-up"
+    ))
+  
+  return(ft)
+}
+
+# ── Generate tables ───────────────────────────────────────────────────────────
+
+WB_depress_sample  <- build_coef_table(
+  WB_model_depress_full_sample,
+  "Depression (CBCL DSM-5 Depression T-Score) — Pre-Matched Sample"
+)
+
+WB_depress_matched <- build_coef_table(
+  WB_model_depress_full_matched,
+  "Depression (CBCL DSM-5 Depression T-Score) — Matched Sample"
+)
+
+WB_depress_sample
+WB_depress_matched
+```
+
+### C2: Depression -- Matched (WH)
+
+```{r build-depress-regression-table-wh}
+# ── Define model list ─────────────────────────────────────────────────────────
+WH_model_depress_full_sample <- list(
+  "All Participants" = prematch_depress_model_WH,
+  "White Only"       = prematch_depress_model_onlyWH,
+  "Hispanic Only"    = prematch_depress_model_onlyH,
+  "Race-Controlled"  = prematch_depress_model_race_control_WH
+)
+
+WH_model_depress_full_matched <- list(
+  "All Participants" = matched_depress_model_WH,
+  "White Only"       = matched_depress_model_onlyWH,
+  "Hispanic Only"    = matched_depress_model_onlyH,
+  "Race-Controlled"  = matched_depress_model_race_control_WH
+)
+
+# ── Shared reference levels ───────────────────────────────────────────────────
+
+reference_levels <- c(
+  "(Intercept)"                     = "N/A",
+  "is_his"                          = "Non-Hispanic (0)",
+  "ed_det_susp_baseline_31"         = "No Suspension (0)",
+  "cbcl_scr_dsm5_depress_t_ses-00A" = "Continuous Score",
+  "demo_sex_v22"                    = "Male (1)",
+  "crpbi_caregiver1_y1"             = "Continuous Score",
+  "income_bracket2"                 = "<$50K (Reference)",
+  "income_bracket3"                 = "<$50K (Reference)",
+  "income_bracket4"                 = "<$50K (Reference)",
+  "income_bracket5"                 = "<$50K (Reference)",
+  "income_bracket777"               = "<$50K (Reference)",
+  "income_bracket999"               = "<$50K (Reference)",
+  "parental_ed_bracket2"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket3"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket4"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket5"            = "Up to HS no diploma (Reference)",
+  "marital_status_bracket2"         = "Married/Living Together (Reference)",
+  "marital_status_bracket3"         = "Married/Living Together (Reference)",
+  "siteFlorida International University"        = "Children's Hospital Los Angeles",
+  "siteLaureate Institute for Brain Research"   = "Children's Hospital Los Angeles",
+  "siteMedical University of South Carolina"    = "Children's Hospital Los Angeles",
+  "siteOregon Health & Science University"      = "Children's Hospital Los Angeles",
+  "siteSRI International"                       = "Children's Hospital Los Angeles",
+  "siteUniversity of California, Los Angeles"   = "Children's Hospital Los Angeles",
+  "siteUniversity of California, San Diego"     = "Children's Hospital Los Angeles",
+  "siteUniversity of Colorado Boulder"          = "Children's Hospital Los Angeles",
+  "siteUniversity of Florida"                   = "Children's Hospital Los Angeles",
+  "siteUniversity of Maryland, Baltimore"       = "Children's Hospital Los Angeles",
+  "siteUniversity of Michigan"                  = "Children's Hospital Los Angeles",
+  "siteUniversity of Minnesota"                 = "Children's Hospital Los Angeles",
+  "siteUniversity of Pittsburgh Medical Center" = "Children's Hospital Los Angeles",
+  "siteUniversity of Rochester"                 = "Children's Hospital Los Angeles",
+  "siteUniversity of Utah"                      = "Children's Hospital Los Angeles",
+  "siteUniversity of Vermont"                   = "Children's Hospital Los Angeles",
+  "siteUniversity of Wisconsin, Milwaukee"      = "Children's Hospital Los Angeles",
+  "siteVirginia Commonwealth University"        = "Children's Hospital Los Angeles",
+  "siteWashington University in St. Louis"      = "Children's Hospital Los Angeles",
+  "siteYale University"                         = "Children's Hospital Los Angeles"
+)
+
+# ── Core builder function ─────────────────────────────────────────────────────
+
+build_coef_table <- function(model_list, title_label) {
+  
+  all_variable_names <- get_all_variables(model_list)
+  
+  # Auto-fill any missing reference levels
+  ref_levels <- reference_levels  # copy shared reference levels
+  for (var in all_variable_names) {
+    if (!(var %in% names(ref_levels))) {
+      if      (grepl("income_bracket",         var)) ref_levels[var] <- "<$50K (Reference)"
+      else if (grepl("parental_ed_bracket",  var)) ref_levels[var] <- "Up to HS no diploma (Reference)"
+      else if (grepl("marital_status_bracket", var)) ref_levels[var] <- "Married/Living Together (Reference)"
+      else                                            ref_levels[var] <- "Reference Category"
+    }
+  }
+  
+  # Base data frame
+  all_coefs <- data.frame(
+    Variable  = all_variable_names,
+    Reference = ref_levels[all_variable_names],
+    stringsAsFactors = FALSE
+  )
+  
+  # Fill in coefficients from each model
+  for (model_name in names(model_list)) {
+    model         <- model_list[[model_name]]
+    model_summary <- summary(model)
+    coefs         <- coef(model_summary)
+    
+    all_coefs[[model_name]] <- NA
+    
+    for (i in 1:nrow(all_coefs)) {
+      var_name <- all_coefs$Variable[i]
+      if (var_name %in% rownames(coefs)) {
+        estimate <- coefs[var_name, "Estimate"]
+        p_value  <- coefs[var_name, "Pr(>|t|)"]
+        all_coefs[i, model_name] <- format_coef(estimate, p_value)
+      }
+    }
+  }
+  
+  # Build flextable
+  n_models <- length(model_list)
+  
+  ft <- flextable(all_coefs) %>%
+    add_header_row(
+      values    = c("", "", title_label),
+      colwidths = c(1, 1, n_models)
+    ) %>%
+    theme_booktabs() %>%
+    align(j = 1:2,              align = "left") %>%
+    align(j = 3:(2 + n_models), align = "center") %>%
+    width(j = 1,              width = 3.5) %>%
+    width(j = 2,              width = 2.0) %>%
+    width(j = 3:(2 + n_models), width = 1.5) %>%
+    bold(i = 1, bold = TRUE) %>%
+    add_footer_lines(values = c(
+      "* p < 0.05, ** p < 0.01, *** p < 0.001",
+      "Values show regression coefficients with significance stars",
+      "Outcome: Depression symptoms (CBCL DSM-5 T-Score) at 3-year follow-up"
+    ))
+  
+  return(ft)
+}
+
+# ── Generate tables ───────────────────────────────────────────────────────────
+
+WH_depress_sample  <- build_coef_table(
+  WH_model_depress_full_sample,
+  "Depression (CBCL DSM-5 Depression T-Score) — Pre-Matched Sample"
+)
+
+WH_depress_matched <- build_coef_table(
+  WH_model_depress_full_matched,
+  "Depression (CBCL DSM-5 Depression T-Score) — Matched Sample"
+)
+
+WH_depress_sample
+WH_depress_matched
+```
+
+
+### C3: Substance Use -- Matched (WB)
+
+```{r build-substance-regression-table-wb}
+# ── Define model list ─────────────────────────────────────────────────────────
+WB_model_subs_full_sample <- list(
+  "All Participants" = prematch_SU_model_WB,
+  "White Only"       = prematch_SU_model_onlyWB,
+  "Black Only"       = prematch_SU_model_onlyB,
+  "Race-Controlled"  = prematch_SU_model_race_control_WB
+)
+
+WB_model_subs_full_matched <- list(
+  "All Participants" = matched_SU_model_WB,
+  "White Only"       = matched_SU_model_onlyWB,
+  "Black Only"       = matched_SU_model_onlyB,
+  "Race-Controlled"  = matched_SU_model_race_control_WB
+)
+
+# ── Shared reference levels ───────────────────────────────────────────────────
+
+reference_levels <- c(
+  "(Intercept)"                     = "N/A",
+  "is_black"                        = "Non-Black (0)",
+  "ed_det_susp_baseline_31"         = "No Suspension (0)",
+  "tlfb_cal_scr_tot_su_ud_ses-04A"  = "Continuous Score",
+  "demo_sex_v22"                    = "Male (1)",
+  "crpbi_caregiver1_y1"             = "Continuous Score",
+  "income_bracket2"                 = "<$50K (Reference)",
+  "income_bracket3"                 = "<$50K (Reference)",
+  "income_bracket4"                 = "<$50K (Reference)",
+  "income_bracket5"                 = "<$50K (Reference)",
+  "income_bracket777"               = "<$50K (Reference)",
+  "income_bracket999"               = "<$50K (Reference)",
+  "parental_ed_bracket2"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket3"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket4"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket5"            = "Up to HS no diploma (Reference)",
+  "marital_status_bracket2"         = "Married/Living Together (Reference)",
+  "marital_status_bracket3"         = "Married/Living Together (Reference)",
+  "siteFlorida International University"        = "Children's Hospital Los Angeles",
+  "siteLaureate Institute for Brain Research"   = "Children's Hospital Los Angeles",
+  "siteMedical University of South Carolina"    = "Children's Hospital Los Angeles",
+  "siteOregon Health & Science University"      = "Children's Hospital Los Angeles",
+  "siteSRI International"                       = "Children's Hospital Los Angeles",
+  "siteUniversity of California, Los Angeles"   = "Children's Hospital Los Angeles",
+  "siteUniversity of California, San Diego"     = "Children's Hospital Los Angeles",
+  "siteUniversity of Colorado Boulder"          = "Children's Hospital Los Angeles",
+  "siteUniversity of Florida"                   = "Children's Hospital Los Angeles",
+  "siteUniversity of Maryland, Baltimore"       = "Children's Hospital Los Angeles",
+  "siteUniversity of Michigan"                  = "Children's Hospital Los Angeles",
+  "siteUniversity of Minnesota"                 = "Children's Hospital Los Angeles",
+  "siteUniversity of Pittsburgh Medical Center" = "Children's Hospital Los Angeles",
+  "siteUniversity of Rochester"                 = "Children's Hospital Los Angeles",
+  "siteUniversity of Utah"                      = "Children's Hospital Los Angeles",
+  "siteUniversity of Vermont"                   = "Children's Hospital Los Angeles",
+  "siteUniversity of Wisconsin, Milwaukee"      = "Children's Hospital Los Angeles",
+  "siteVirginia Commonwealth University"        = "Children's Hospital Los Angeles",
+  "siteWashington University in St. Louis"      = "Children's Hospital Los Angeles",
+  "siteYale University"                         = "Children's Hospital Los Angeles"
+)
+
+# ── Core builder function ─────────────────────────────────────────────────────
+
+build_coef_table <- function(model_list, title_label) {
+  
+  all_variable_names <- get_all_variables(model_list)
+  
+  # Auto-fill any missing reference levels
+  ref_levels <- reference_levels  # copy shared reference levels
+  for (var in all_variable_names) {
+    if (!(var %in% names(ref_levels))) {
+      if      (grepl("income_bracket",         var)) ref_levels[var] <- "<$50K (Reference)"
+      else if (grepl("parental_ed_bracket",  var)) ref_levels[var] <- "Up to HS no diploma (Reference)"
+      else if (grepl("marital_status_bracket", var)) ref_levels[var] <- "Married/Living Together (Reference)"
+      else                                            ref_levels[var] <- "Reference Category"
+    }
+  }
+  
+  # Base data frame
+  all_coefs <- data.frame(
+    Variable  = all_variable_names,
+    Reference = ref_levels[all_variable_names],
+    stringsAsFactors = FALSE
+  )
+  
+  # Fill in coefficients from each model
+  for (model_name in names(model_list)) {
+    model         <- model_list[[model_name]]
+    model_summary <- summary(model)
+    coefs         <- coef(model_summary)
+    
+    all_coefs[[model_name]] <- NA
+    
+    for (i in 1:nrow(all_coefs)) {
+      var_name <- all_coefs$Variable[i]
+      if (var_name %in% rownames(coefs)) {
+        estimate <- coefs[var_name, "Estimate"]
+        p_value  <- coefs[var_name, "Pr(>|t|)"]
+        all_coefs[i, model_name] <- format_coef(estimate, p_value)
+      }
+    }
+  }
+  
+  # Build flextable
+  n_models <- length(model_list)
+  
+  ft <- flextable(all_coefs) %>%
+    add_header_row(
+      values    = c("", "", title_label),
+      colwidths = c(1, 1, n_models)
+    ) %>%
+    theme_booktabs() %>%
+    align(j = 1:2,              align = "left") %>%
+    align(j = 3:(2 + n_models), align = "center") %>%
+    width(j = 1,              width = 3.5) %>%
+    width(j = 2,              width = 2.0) %>%
+    width(j = 3:(2 + n_models), width = 1.5) %>%
+    bold(i = 1, bold = TRUE) %>%
+    add_footer_lines(values = c(
+      "* p < 0.05, ** p < 0.01, *** p < 0.001",
+      "Values show regression coefficients with significance stars",
+      "Outcome: Substance use at 3-year follow-up"
+    ))
+  
+  return(ft)
+}
+
+# ── Generate tables ───────────────────────────────────────────────────────────
+
+WB_subs_sample  <- build_coef_table(
+  WB_model_subs_full_sample,
+  "Substance Use — Pre-Matched Sample"
+)
+
+WB_subs_matched <- build_coef_table(
+  WB_model_subs_full_matched,
+  "Substance Use — Matched Sample"
+)
+
+WB_subs_sample
+WB_subs_matched
+```
+
+### C4: Substance Use -- Matched (WH)
+
+```{r build-substance-regression-table-wh}
+# ── Define model list ─────────────────────────────────────────────────────────
+WH_model_subs_full_sample <- list(
+  "All Participants" = prematch_SU_model_WH,
+  "White Only"       = prematch_SU_model_onlyWH,
+  "Hispanic Only"    = prematch_SU_model_onlyH,
+  "Race-Controlled"  = prematch_SU_model_race_control_WH
+)
+
+WH_model_subs_full_matched <- list(
+  "All Participants" = matched_SU_model_WH,
+  "White Only"       = matched_SU_model_onlyWH,
+  "Hispanic Only"    = matched_SU_model_onlyH,
+  "Race-Controlled"  = matched_SU_model_race_control_WH
+)
+
+# ── Shared reference levels ───────────────────────────────────────────────────
+
+reference_levels <- c(
+  "(Intercept)"                     = "N/A",
+  "is_his"                          = "Non-Hispanic (0)",
+  "ed_det_susp_baseline_31"         = "No Suspension (0)",
+  "tlfb_cal_scr_tot_su_ud_ses-04A"  = "Continuous Score",
+  "demo_sex_v22"                    = "Male (1)",
+  "crpbi_caregiver1_y1"             = "Continuous Score",
+  "income_bracket2"                 = "<$50K (Reference)",
+  "income_bracket3"                 = "<$50K (Reference)",
+  "income_bracket4"                 = "<$50K (Reference)",
+  "income_bracket5"                 = "<$50K (Reference)",
+  "income_bracket777"               = "<$50K (Reference)",
+  "income_bracket999"               = "<$50K (Reference)",
+  "parental_ed_bracket2"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket3"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket4"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket5"            = "Up to HS no diploma (Reference)",
+  "marital_status_bracket2"         = "Married/Living Together (Reference)",
+  "marital_status_bracket3"         = "Married/Living Together (Reference)",
+  "siteFlorida International University"        = "Children's Hospital Los Angeles",
+  "siteLaureate Institute for Brain Research"   = "Children's Hospital Los Angeles",
+  "siteMedical University of South Carolina"    = "Children's Hospital Los Angeles",
+  "siteOregon Health & Science University"      = "Children's Hospital Los Angeles",
+  "siteSRI International"                       = "Children's Hospital Los Angeles",
+  "siteUniversity of California, Los Angeles"   = "Children's Hospital Los Angeles",
+  "siteUniversity of California, San Diego"     = "Children's Hospital Los Angeles",
+  "siteUniversity of Colorado Boulder"          = "Children's Hospital Los Angeles",
+  "siteUniversity of Florida"                   = "Children's Hospital Los Angeles",
+  "siteUniversity of Maryland, Baltimore"       = "Children's Hospital Los Angeles",
+  "siteUniversity of Michigan"                  = "Children's Hospital Los Angeles",
+  "siteUniversity of Minnesota"                 = "Children's Hospital Los Angeles",
+  "siteUniversity of Pittsburgh Medical Center" = "Children's Hospital Los Angeles",
+  "siteUniversity of Rochester"                 = "Children's Hospital Los Angeles",
+  "siteUniversity of Utah"                      = "Children's Hospital Los Angeles",
+  "siteUniversity of Vermont"                   = "Children's Hospital Los Angeles",
+  "siteUniversity of Wisconsin, Milwaukee"      = "Children's Hospital Los Angeles",
+  "siteVirginia Commonwealth University"        = "Children's Hospital Los Angeles",
+  "siteWashington University in St. Louis"      = "Children's Hospital Los Angeles",
+  "siteYale University"                         = "Children's Hospital Los Angeles"
+)
+
+# ── Core builder function ─────────────────────────────────────────────────────
+
+build_coef_table <- function(model_list, title_label) {
+  
+  all_variable_names <- get_all_variables(model_list)
+  
+  # Auto-fill any missing reference levels
+  ref_levels <- reference_levels  # copy shared reference levels
+  for (var in all_variable_names) {
+    if (!(var %in% names(ref_levels))) {
+      if      (grepl("income_bracket",         var)) ref_levels[var] <- "<$50K (Reference)"
+      else if (grepl("parental_ed_bracket",  var)) ref_levels[var] <- "Up to HS no diploma (Reference)"
+      else if (grepl("marital_status_bracket", var)) ref_levels[var] <- "Married/Living Together (Reference)"
+      else                                            ref_levels[var] <- "Reference Category"
+    }
+  }
+  
+  # Base data frame
+  all_coefs <- data.frame(
+    Variable  = all_variable_names,
+    Reference = ref_levels[all_variable_names],
+    stringsAsFactors = FALSE
+  )
+  
+  # Fill in coefficients from each model
+  for (model_name in names(model_list)) {
+    model         <- model_list[[model_name]]
+    model_summary <- summary(model)
+    coefs         <- coef(model_summary)
+    
+    all_coefs[[model_name]] <- NA
+    
+    for (i in 1:nrow(all_coefs)) {
+      var_name <- all_coefs$Variable[i]
+      if (var_name %in% rownames(coefs)) {
+        estimate <- coefs[var_name, "Estimate"]
+        p_value  <- coefs[var_name, "Pr(>|t|)"]
+        all_coefs[i, model_name] <- format_coef(estimate, p_value)
+      }
+    }
+  }
+  
+  # Build flextable
+  n_models <- length(model_list)
+  
+  ft <- flextable(all_coefs) %>%
+    add_header_row(
+      values    = c("", "", title_label),
+      colwidths = c(1, 1, n_models)
+    ) %>%
+    theme_booktabs() %>%
+    align(j = 1:2,              align = "left") %>%
+    align(j = 3:(2 + n_models), align = "center") %>%
+    width(j = 1,              width = 3.5) %>%
+    width(j = 2,              width = 2.0) %>%
+    width(j = 3:(2 + n_models), width = 1.5) %>%
+    bold(i = 1, bold = TRUE) %>%
+    add_footer_lines(values = c(
+      "* p < 0.05, ** p < 0.01, *** p < 0.001",
+      "Values show regression coefficients with significance stars",
+      "Outcome: Substance use at 3-year follow-up"
+    ))
+  
+  return(ft)
+}
+
+# ── Generate tables ───────────────────────────────────────────────────────────
+
+WH_subs_sample  <- build_coef_table(
+  WH_model_subs_full_sample,
+  "Substance Use — Pre-Matched Sample"
+)
+
+WH_subs_matched <- build_coef_table(
+  WH_model_subs_full_matched,
+  "Substance Use — Matched Sample"
+)
+
+WH_subs_sample
+WH_subs_matched
+```
+
+
+### C4: Academic Grades -- Matched (WB)
+
+```{r build-grades-regression-table-wb}
+# ── Define model list ─────────────────────────────────────────────────────────
+WB_model_grade_full_sample <- list(
+  "All Participants" = prematch_grade_model_WB,
+  "White Only"       = prematch_grade_model_onlyWB,
+  "Black Only"       = prematch_grade_model_onlyB,
+  "Race-Controlled"  = prematch_grade_model_race_control_WB
+)
+
+WB_model_grade_full_matched <- list(
+  "All Participants" = matched_grade_model_WB,
+  "White Only"       = matched_grade_model_onlyWB,
+  "Black Only"       = matched_grade_model_onlyB,
+  "Race-Controlled"  = matched_grade_model_race_control_WB
+)
+
+# ── Shared reference levels ───────────────────────────────────────────────────
+
+reference_levels <- c(
+  "(Intercept)"                     = "N/A",
+  "is_black"                        = "Non-Black (0)",
+  "ed_det_susp_baseline_31"         = "No Suspension (0)",
+  "grade_gpa_ses-03A"               = "Continuous Score",
+  "grade_gpa_ses-04A"               = "Continuous Score",
+  "demo_sex_v22"                    = "Male (1)",
+  "crpbi_caregiver1_y1"             = "Continuous Score",
+  "income_bracket2"                 = "<$50K (Reference)",
+  "income_bracket3"                 = "<$50K (Reference)",
+  "income_bracket4"                 = "<$50K (Reference)",
+  "income_bracket5"                 = "<$50K (Reference)",
+  "income_bracket777"               = "<$50K (Reference)",
+  "income_bracket999"               = "<$50K (Reference)",
+  "parental_ed_bracket2"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket3"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket4"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket5"            = "Up to HS no diploma (Reference)",
+  "marital_status_bracket2"         = "Married/Living Together (Reference)",
+  "marital_status_bracket3"         = "Married/Living Together (Reference)",
+  "siteFlorida International University"        = "Children's Hospital Los Angeles",
+  "siteLaureate Institute for Brain Research"   = "Children's Hospital Los Angeles",
+  "siteMedical University of South Carolina"    = "Children's Hospital Los Angeles",
+  "siteOregon Health & Science University"      = "Children's Hospital Los Angeles",
+  "siteSRI International"                       = "Children's Hospital Los Angeles",
+  "siteUniversity of California, Los Angeles"   = "Children's Hospital Los Angeles",
+  "siteUniversity of California, San Diego"     = "Children's Hospital Los Angeles",
+  "siteUniversity of Colorado Boulder"          = "Children's Hospital Los Angeles",
+  "siteUniversity of Florida"                   = "Children's Hospital Los Angeles",
+  "siteUniversity of Maryland, Baltimore"       = "Children's Hospital Los Angeles",
+  "siteUniversity of Michigan"                  = "Children's Hospital Los Angeles",
+  "siteUniversity of Minnesota"                 = "Children's Hospital Los Angeles",
+  "siteUniversity of Pittsburgh Medical Center" = "Children's Hospital Los Angeles",
+  "siteUniversity of Rochester"                 = "Children's Hospital Los Angeles",
+  "siteUniversity of Utah"                      = "Children's Hospital Los Angeles",
+  "siteUniversity of Vermont"                   = "Children's Hospital Los Angeles",
+  "siteUniversity of Wisconsin, Milwaukee"      = "Children's Hospital Los Angeles",
+  "siteVirginia Commonwealth University"        = "Children's Hospital Los Angeles",
+  "siteWashington University in St. Louis"      = "Children's Hospital Los Angeles",
+  "siteYale University"                         = "Children's Hospital Los Angeles"
+)
+
+# ── Core builder function ─────────────────────────────────────────────────────
+
+build_coef_table <- function(model_list, title_label) {
+  
+  all_variable_names <- get_all_variables(model_list)
+  
+  # Auto-fill any missing reference levels
+  ref_levels <- reference_levels  # copy shared reference levels
+  for (var in all_variable_names) {
+    if (!(var %in% names(ref_levels))) {
+      if      (grepl("income_bracket",         var)) ref_levels[var] <- "<$50K (Reference)"
+      else if (grepl("parental_ed_bracket",  var)) ref_levels[var] <- "Up to HS no diploma (Reference)"
+      else if (grepl("marital_status_bracket", var)) ref_levels[var] <- "Married/Living Together (Reference)"
+      else                                            ref_levels[var] <- "Reference Category"
+    }
+  }
+  
+  # Base data frame
+  all_coefs <- data.frame(
+    Variable  = all_variable_names,
+    Reference = ref_levels[all_variable_names],
+    stringsAsFactors = FALSE
+  )
+  
+  # Fill in coefficients from each model
+  for (model_name in names(model_list)) {
+    model         <- model_list[[model_name]]
+    model_summary <- summary(model)
+    coefs         <- coef(model_summary)
+    
+    all_coefs[[model_name]] <- NA
+    
+    for (i in 1:nrow(all_coefs)) {
+      var_name <- all_coefs$Variable[i]
+      if (var_name %in% rownames(coefs)) {
+        estimate <- coefs[var_name, "Estimate"]
+        p_value  <- coefs[var_name, "Pr(>|t|)"]
+        all_coefs[i, model_name] <- format_coef(estimate, p_value)
+      }
+    }
+  }
+  
+  # Build flextable
+  n_models <- length(model_list)
+  
+  ft <- flextable(all_coefs) %>%
+    add_header_row(
+      values    = c("", "", title_label),
+      colwidths = c(1, 1, n_models)
+    ) %>%
+    theme_booktabs() %>%
+    align(j = 1:2,              align = "left") %>%
+    align(j = 3:(2 + n_models), align = "center") %>%
+    width(j = 1,              width = 3.5) %>%
+    width(j = 2,              width = 2.0) %>%
+    width(j = 3:(2 + n_models), width = 1.5) %>%
+    bold(i = 1, bold = TRUE) %>%
+    add_footer_lines(values = c(
+      "* p < 0.05, ** p < 0.01, *** p < 0.001",
+      "Values show regression coefficients with significance stars",
+      "Outcome: GPA at 3-year follow-up"
+    ))
+  
+  return(ft)
+}
+
+# ── Generate tables ───────────────────────────────────────────────────────────
+
+WB_grade_sample  <- build_coef_table(
+  WB_model_grade_full_sample,
+  "Academic Grade — Pre-Matched Sample"
+)
+
+WB_grade_matched <- build_coef_table(
+  WB_model_grade_full_matched,
+  "Academic Grade — Matched Sample"
+)
+
+WB_grade_sample
+WB_grade_matched
+```
+
+
+### C5: Academic Grade -- Matched (WH)
+
+```{r build-grades-regression-table-wh}
+# ── Define model list ─────────────────────────────────────────────────────────
+WH_model_grade_full_sample <- list(
+  "All Participants" = prematch_grade_model_WH,
+  "White Only"       = prematch_grade_model_onlyWH,
+  "Hispanic Only"    = prematch_grade_model_onlyH,
+  "Race-Controlled"  = prematch_grade_model_race_control_WH
+)
+
+WH_model_grade_full_matched <- list(
+  "All Participants" = matched_grade_model_WH,
+  "White Only"       = matched_grade_model_onlyWH,
+  "Hispanic Only"    = matched_grade_model_onlyH,
+  "Race-Controlled"  = matched_grade_model_race_control_WH
+)
+
+# ── Shared reference levels ───────────────────────────────────────────────────
+
+reference_levels <- c(
+  "(Intercept)"                     = "N/A",
+  "is_his"                          = "Non-Hispanic (0)",
+  "ed_det_susp_baseline_31"         = "No Suspension (0)",
+  "grade_gpa_ses-03A"               = "Continuous Score",
+  "grade_gpa_ses-04A"               = "Continuous Score",
+  "demo_sex_v22"                    = "Male (1)",
+  "crpbi_caregiver1_y1"             = "Continuous Score",
+  "income_bracket2"                 = "<$50K (Reference)",
+  "income_bracket3"                 = "<$50K (Reference)",
+  "income_bracket4"                 = "<$50K (Reference)",
+  "income_bracket5"                 = "<$50K (Reference)",
+  "income_bracket777"               = "<$50K (Reference)",
+  "income_bracket999"               = "<$50K (Reference)",
+  "parental_ed_bracket2"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket3"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket4"            = "Up to HS no diploma (Reference)",
+  "parental_ed_bracket5"            = "Up to HS no diploma (Reference)",
+  "marital_status_bracket2"         = "Married/Living Together (Reference)",
+  "marital_status_bracket3"         = "Married/Living Together (Reference)",
+  "siteFlorida International University"        = "Children's Hospital Los Angeles",
+  "siteLaureate Institute for Brain Research"   = "Children's Hospital Los Angeles",
+  "siteMedical University of South Carolina"    = "Children's Hospital Los Angeles",
+  "siteOregon Health & Science University"      = "Children's Hospital Los Angeles",
+  "siteSRI International"                       = "Children's Hospital Los Angeles",
+  "siteUniversity of California, Los Angeles"   = "Children's Hospital Los Angeles",
+  "siteUniversity of California, San Diego"     = "Children's Hospital Los Angeles",
+  "siteUniversity of Colorado Boulder"          = "Children's Hospital Los Angeles",
+  "siteUniversity of Florida"                   = "Children's Hospital Los Angeles",
+  "siteUniversity of Maryland, Baltimore"       = "Children's Hospital Los Angeles",
+  "siteUniversity of Michigan"                  = "Children's Hospital Los Angeles",
+  "siteUniversity of Minnesota"                 = "Children's Hospital Los Angeles",
+  "siteUniversity of Pittsburgh Medical Center" = "Children's Hospital Los Angeles",
+  "siteUniversity of Rochester"                 = "Children's Hospital Los Angeles",
+  "siteUniversity of Utah"                      = "Children's Hospital Los Angeles",
+  "siteUniversity of Vermont"                   = "Children's Hospital Los Angeles",
+  "siteUniversity of Wisconsin, Milwaukee"      = "Children's Hospital Los Angeles",
+  "siteVirginia Commonwealth University"        = "Children's Hospital Los Angeles",
+  "siteWashington University in St. Louis"      = "Children's Hospital Los Angeles",
+  "siteYale University"                         = "Children's Hospital Los Angeles"
+)
+
+# ── Core builder function ─────────────────────────────────────────────────────
+
+build_coef_table <- function(model_list, title_label) {
+  
+  all_variable_names <- get_all_variables(model_list)
+  
+  # Auto-fill any missing reference levels
+  ref_levels <- reference_levels  # copy shared reference levels
+  for (var in all_variable_names) {
+    if (!(var %in% names(ref_levels))) {
+      if      (grepl("income_bracket",         var)) ref_levels[var] <- "<$50K (Reference)"
+      else if (grepl("parental_ed_bracket",  var)) ref_levels[var] <- "Up to HS no diploma (Reference)"
+      else if (grepl("marital_status_bracket", var)) ref_levels[var] <- "Married/Living Together (Reference)"
+      else                                            ref_levels[var] <- "Reference Category"
+    }
+  }
+  
+  # Base data frame
+  all_coefs <- data.frame(
+    Variable  = all_variable_names,
+    Reference = ref_levels[all_variable_names],
+    stringsAsFactors = FALSE
+  )
+  
+  # Fill in coefficients from each model
+  for (model_name in names(model_list)) {
+    model         <- model_list[[model_name]]
+    model_summary <- summary(model)
+    coefs         <- coef(model_summary)
+    
+    all_coefs[[model_name]] <- NA
+    
+    for (i in 1:nrow(all_coefs)) {
+      var_name <- all_coefs$Variable[i]
+      if (var_name %in% rownames(coefs)) {
+        estimate <- coefs[var_name, "Estimate"]
+        p_value  <- coefs[var_name, "Pr(>|t|)"]
+        all_coefs[i, model_name] <- format_coef(estimate, p_value)
+      }
+    }
+  }
+  
+  # Build flextable
+  n_models <- length(model_list)
+  
+  ft <- flextable(all_coefs) %>%
+    add_header_row(
+      values    = c("", "", title_label),
+      colwidths = c(1, 1, n_models)
+    ) %>%
+    theme_booktabs() %>%
+    align(j = 1:2,              align = "left") %>%
+    align(j = 3:(2 + n_models), align = "center") %>%
+    width(j = 1,              width = 3.5) %>%
+    width(j = 2,              width = 2.0) %>%
+    width(j = 3:(2 + n_models), width = 1.5) %>%
+    bold(i = 1, bold = TRUE) %>%
+    add_footer_lines(values = c(
+      "* p < 0.05, ** p < 0.01, *** p < 0.001",
+      "Values show regression coefficients with significance stars",
+      "Outcome: GPA at 3-year follow-up"
+    ))
+  
+  return(ft)
+}
+
+# ── Generate tables ───────────────────────────────────────────────────────────
+
+WH_grade_sample  <- build_coef_table(
+  WH_model_grade_full_sample,
+  "Academic Grade — Pre-Matched Sample"
+)
+
+WH_grade_matched <- build_coef_table(
+  WH_model_grade_full_matched,
+  "Academic Grade — Matched Sample"
+)
+
+WH_grade_sample
+WH_grade_matched
+```
+
+
+```{r save-regression-table}
+# ============================================================
+# Save the regression table to a Word document.
+# ============================================================
+
+# Depression 
+# WB
+save_as_docx(
+  `WB_Depression_PreMatch_Regression` = WB_depress_sample,
+  path = "output/WB_Depression_PreMatch_Regression.docx"
+)
+cat("Saved: WB_Depression_PreMatch_Regression.docx\n")
+
+save_as_docx(
+  `WB_Depression_Matched_Regression` = WB_depress_matched,
+  path = "output/WB_Depression_Matched_Regression.docx"
+)
+cat("Saved: WB_Depression_Matched_Regression.docx\n")
+
+# WH
+save_as_docx(
+  `WH_Depression_PreMatch_Regression` = WH_depress_sample,
+  path = "output/WH_Depression_PreMatch_Regression.docx"
+)
+cat("Saved: WH_Depression_PreMatch_Regression.docx\n")
+
+save_as_docx(
+  `WH_Depression_Matched_Regression` = WH_depress_matched,
+  path = "output/WH_Depression_Matched_Regression.docx"
+)
+cat("Saved: WH_Depression_Matched_Regression.docx\n")
+
+# Academic grades
+# WB
+save_as_docx(
+  `WB_GPA_PreMatch_Regression` = WB_grade_sample,
+  path = "output/WB_GPA_PreMatch_Regression.docx"
+)
+cat("Saved: WB_GPA_PreMatch_Regression.docx\n")
+
+save_as_docx(
+  `WB_GPA_Matched_Regression` = WB_grade_matched,
+  path = "output/WB_GPA_Matched_Regression.docx"
+)
+cat("Saved: WB_GPA_Matched_Regression.docx\n")
+
+# WH
+save_as_docx(
+  `WH_GPA_PreMatch_Regression` = WH_grade_sample,
+  path = "output/WH_GPA_PreMatch_Regression.docx"
+)
+cat("Saved: WH_GPA_PreMatch_Regression.docx\n")
+
+save_as_docx(
+  `WH_GPA_Matched_Regression` = WH_grade_matched,
+  path = "output/WH_GPA_Matched_Regression.docx"
+)
+cat("Saved: WB_GPA_Matched_Regression.docx\n")
+```
+
+# Analysis of Variance
+
+Examine the relationship between rule-breaking behavior (`cbcl_scr_syn_rulebreak_t`) and the proportion of students receiving disciplinary action (`ed_det_susp_baseline_3`), and whether this relationship varied by race/ethnicity.
+
+::: callout-note
+ANOVA requires a continuous dependent variable (rulebreaking t-score) and an independent variable with at least 2 levels which determine the groups to compare.
+
+Normally you should test for normality visually using a histogram and a Q-Q plot; however, in case of large samples, [normality is not required]{.underline} due to the central limit theorem. You should test for the equality of variances using a boxplot for example or formally via the Levene's test or Bartlett's test. There should be no significant outliers.
+:::
+
+## Equality of Variances
+
+```{r anova-wb-matched}
+EV_WB <- WB_matched_data_raw %>%
+  mutate(is_black = factor(is_black, labels = c("White", "Black"))) %>%
+  ggplot( aes(x=is_black, y=cbcl_scr_syn_rulebreak_t, fill=is_black)) +
+    geom_violin(alpha = 0.6) +
+    scale_fill_brand(picks = c(1, 20)) +
+    theme_brand() + labs(y = "Rule-breaking t-score") +
+    theme(
+      legend.position="none",
+      plot.title = element_text(size=11)
+    ) +
+    ggtitle("A Boxplot of Rulebreak T-Score by Race/Ethnicity (White vs Black)") +
+    xlab("")
+EV_WB
+
+```
+
+```{r anova-wh-matched}
+EV_WH <- WH_matched_data_raw %>%
+  mutate(is_his = factor(is_his, labels = c("White", "Hispanic"))) %>%
+  ggplot( aes(x=is_his, y=cbcl_scr_syn_rulebreak_t, fill=is_his)) +
+    geom_violin(alpha = 0.6) +
+    scale_fill_brand(picks = c(1, 20)) +
+    theme_brand() + labs(y = "Rule-breaking t-score") +
+    theme(
+      legend.position="none",
+      plot.title = element_text(size=11)
+    ) +
+    ggtitle("A Boxplot of Rulebreak T-Score by Race/Ethnicity (White vs Hispanic)") +
+    xlab("")
+EV_WH
+
+equality_var <- cowplot::plot_grid(EV_WB, EV_WH, nrow = 2)
+
+ggsave("output/equality_var.png",
+       equality_var, width = 6, height = 6)
+```
+
+The dispersion is more or less the same between the racial groups.
+
+## Rule Breaking Descriptives
+
+Descriptives for rule breaking behavior at baseline by race/ethnicity.
+
+```{r descript-rulebreaking}
+# relabel variables for readability
+filtered_df_baseline_recoded_W_anov <- filtered_df_baseline_recoded_W %>%
+  mutate(`CBCL Rule-Break T-score` = cbcl_scr_syn_rulebreak_t, 
+         `Breaks Rules (CBCL q28)` = factor(cbcl_q28_p, labels = c("Not True", "Somewhat/Sometimes True", "Very True/Often True"))
+  )
+
+filtered_df_baseline_recoded_B_anov <- filtered_df_baseline_recoded_B %>%
+  mutate(`CBCL Rule-Break T-score` = cbcl_scr_syn_rulebreak_t, 
+         `Breaks Rules (CBCL q28)` = factor(cbcl_q28_p, labels = c("Not True", "Somewhat/Sometimes True", "Very True/Often True"))
+  )
+
+filtered_df_baseline_recoded_H_anov <- filtered_df_baseline_recoded_H %>%
+  mutate(`CBCL Rule-Break T-score` = cbcl_scr_syn_rulebreak_t, 
+         `Breaks Rules (CBCL q28)` = factor(cbcl_q28_p, labels = c("Not True", "Somewhat/Sometimes True", "Very True/Often True"))
+  )
+
+# create tables 
+table_rule_white <- table1(
+  ~ `CBCL Rule-Break T-score` + `Breaks Rules (CBCL q28)`,
+  data = filtered_df_baseline_recoded_W_anov,
+  caption = "Rule-Breaking by Race/Ethnicity at Baseline: White Participants"
+  #render.missing = NULL
+)
+table_rule_white
+
+table_rule_black <- table1(
+  ~ `CBCL Rule-Break T-score` + `Breaks Rules (CBCL q28)`,
+  data = filtered_df_baseline_recoded_B_anov,
+  caption = "Rule-Breaking by Race/Ethnicity at Baseline: Black Participants"
+  #render.missing = NULL
+)
+table_rule_black
+
+table_rule_his <- table1(
+  ~ `CBCL Rule-Break T-score` + `Breaks Rules (CBCL q28)`,
+  data = filtered_df_baseline_recoded_H_anov,
+  caption = "Rule-Breaking by Race/Ethnicity at Baseline: Hispanic Participants"
+  #render.missing = NULL
+)
+table_rule_his
+```
+
+## D1: One-Way ANOVA for T-Scores (Continous)
+
+OUTCOME: suspension by year 3 
+
+PREDICTORS: CBCL rule breaking (t-score) and race/ethnicity
+
+```{r anova-black}
+res_aov_B <- aov(ed_det_susp_baseline_3 ~ cbcl_scr_syn_rulebreak_t * as.factor(is_black), 
+  data = WB_matched_data_raw,
+) # <3>
+
+#summary(res_aov_B)
+report(res_aov_B)
+```
+
+3.  The asterisk gives you both main effects and the interaction in one call, equivalent to writing a + b + a:b
+
+```{r anova-his}
+res_aov_H <- aov(ed_det_susp_baseline_3 ~ cbcl_scr_syn_rulebreak_t * as.factor(is_his),
+  data = WH_matched_data_raw,
+)
+
+#summary(res_aov_H)
+report(res_aov_H)
+```
+
+## D2: One-Way ANOVA for T-Scores (Quartiles)
+
+OUTCOME: suspension by year 3 
+
+PREDICTORS: CBCL rule breaking (t-score in quartiles) and race/ethnicity
+
+```{r anova-black-quart}
+WB_matched_data_raw <- WB_matched_data_raw %>%
+  mutate(cbcl_scr_syn_rulebreak_t_quart = ntile(cbcl_scr_syn_rulebreak_t, 4))
+
+res_aov_B_quart <- aov(ed_det_susp_baseline_3 ~ cbcl_scr_syn_rulebreak_t_quart * as.factor(is_black), 
+  data = WB_matched_data_raw,
+)
+
+#summary(res_aov_B_quart)
+report(res_aov_B_quart)
+```
+
+```{r anova-his-quart}
+WH_matched_data_raw <- WH_matched_data_raw %>%
+  mutate(cbcl_scr_syn_rulebreak_t_quart = ntile(cbcl_scr_syn_rulebreak_t, 4))
+
+res_aov_H_quart <- aov(ed_det_susp_baseline_3 ~ cbcl_scr_syn_rulebreak_t_quart * as.factor(is_his),
+  data = WH_matched_data_raw,
+)
+
+#summary(res_aov_H_quart)
+report(res_aov_H_quart)
+```
+
+# Build Visualizations
+
+## Rulebreaking Quartiles
+
+White-Black matched sample
+```{r rulebreak-bar-wb, warning=FALSE}
+abcd_all <- abcd_all %>%
+  mutate(cbcl_scr_syn_rulebreak_t_quart = ntile(cbcl_scr_syn_rulebreak_t, 4)) %>%
+  mutate(demo_sex_v2 = factor(demo_sex_v2),
+         marital_status_bracket = factor(marital_status_bracket),
+         time = factor(eventname, labels = c("Baseline", "1 Year", "2 Year", "3 Year", "4 Year", "5 Year", "6 Year", "7 Year")))
+
+WB_matched_abcd_all <- semi_join(abcd_all, WB_matched_data, by = "src_subject_id")
+
+WB_matched_abcd_all <- WB_matched_abcd_all %>%
+  mutate(
+    race_ethnicity_recode = case_when(
+      race_ethnicity == 2         ~ "White",
+      race_ethnicity %in% c(3, 6) ~ "Black",
+      TRUE                        ~ NA_character_
+    ),
+    race_ethnicity_recode = factor(race_ethnicity_recode, levels = c("White", "Black"))
+  ) %>%
+  filter(!is.na(race_ethnicity_recode))
+
+n_distinct(WB_matched_data_raw$src_subject_id)
+n_distinct(WB_matched_abcd_all$src_subject_id)
+cat("White participants (control):",
+    n_distinct(WB_matched_abcd_all$src_subject_id[WB_matched_abcd_all$race_ethnicity_recode == "White"]),
+    "\n")
+
+cat("Black participants (treated):",
+    n_distinct(WB_matched_abcd_all$src_subject_id[WB_matched_abcd_all$race_ethnicity_recode == "Black"]),
+    "\n")
+
+WB_rulebreak_quart_plot <- WB_matched_abcd_all %>%
+  filter(time == "Baseline" | time == "1 Year" | time == "2 Year" | time == "3 Year" | time == "4 Year") %>%
+  filter(!is.na(cbcl_scr_syn_rulebreak_t_quart)) %>%
+  ggplot(aes(x = factor(cbcl_scr_syn_rulebreak_t_quart), y = kbi_p_c_det_susp_l, fill = race_ethnicity_recode)) +
+  stat_summary(
+    fun = "mean",
+    geom = "col",
+    position = position_dodge(width = 0.9),
+    color = "black", width = 0.8
+  ) +
+  stat_summary(
+    fun.data = "mean_se",   # or mean_cl_normal for 95% CI
+    geom = "errorbar",
+    position = position_dodge(width = 0.9),
+    width = 0.2
+  ) +
+  facet_wrap(~ time) +
+  scale_fill_manual(values = c("White" = "#D16284", "Black" = "#407088")) +
+  labs(x = "Rule-breaking t-score (quartiles)", y = "Proportion receiving disciplinary action", fill = "Ethnoracial identity", title = "Proportion of disciplinary action by rule-breaking t-score\n in the White (n=3421) and Black (n=1340)\n matched sample") +
+  theme_brand() + theme(plot.title = element_text(face = "bold", hjust = 0.5))
+WB_rulebreak_quart_plot
+
+ggsave("output/WB_rulebreak_quart_plot.png",
+       WB_rulebreak_quart_plot, width = 9, height = 8)
+```
+
+White-Hispanic matched sample
+```{r rulebreak-bar-wh, warning=FALSE}
+WH_matched_abcd_all <- semi_join(abcd_all, WH_matched_data, by = "src_subject_id")
+
+WH_matched_abcd_all <- WH_matched_abcd_all %>%
+  mutate(
+      race_ethnicity_recode = case_when(
+      race_ethnicity == 2           ~ "White",
+      race_ethnicity %in% c(1, 5)   ~ "Latine",
+      TRUE                          ~ NA_character_
+    ),
+    race_ethnicity_recode = factor(race_ethnicity_recode, levels = c("White", "Latine"))
+  ) %>%
+  filter(!is.na(race_ethnicity_recode))
+
+n_distinct(WH_matched_data$src_subject_id)
+n_distinct(WH_matched_abcd_all$src_subject_id)
+cat("White participants (control):",
+    n_distinct(WH_matched_abcd_all$src_subject_id[WH_matched_abcd_all$race_ethnicity_recode == "White"]),
+    "\n")
+
+cat("Latine participants (treated):",
+    n_distinct(WH_matched_abcd_all$src_subject_id[WH_matched_abcd_all$race_ethnicity_recode == "Latine"]),
+    "\n")
+
+WH_rulebreak_quart_plot <- WH_matched_abcd_all %>%
+  filter(time == "Baseline" | time == "1 Year" | time == "2 Year" | time == "3 Year" | time == "4 Year") %>%
+  filter(!is.na(cbcl_scr_syn_rulebreak_t_quart)) %>%
+  ggplot(aes(x = factor(cbcl_scr_syn_rulebreak_t_quart), y = kbi_p_c_det_susp_l, fill = race_ethnicity_recode)) +
+  stat_summary(
+    fun = "mean",
+    geom = "col",
+    position = position_dodge(width = 0.9),
+    color = "black", width = 0.8
+  ) +
+  stat_summary(
+    fun.data = "mean_se",   # or mean_cl_normal for 95% CI
+    geom = "errorbar",
+    position = position_dodge(width = 0.9),
+    width = 0.2
+  ) +
+  facet_wrap(~ time) +
+  scale_fill_manual(values = c("White" = "#D16284", "Latine" = "#6E4499")) +
+  labs(x = "Rule-breaking t-score (quartiles)", y = "Proportion receiving disciplinary action", fill = "Ethnoracial identity", title = "Proportion of disciplinary action by rule-breaking t-score\n in the White (n=4319) and Latine (n=1733)\n matched sample") +
+  theme_brand() + theme(plot.title = element_text(face = "bold", hjust = 0.5))
+WH_rulebreak_quart_plot
+
+ggsave("output/WH_rulebreak_quart_plot.png",
+       WH_rulebreak_quart_plot, width = 9, height = 8)
+
+ggsave("output/combined_rulebreak_quart_plot.png",
+       cowplot::plot_grid(WB_rulebreak_quart_plot, WH_rulebreak_quart_plot, nrow = 2), 
+       width = 9, height = 14)
+```
+
+# Clean up R workspace
+
+```{r, results='hide'}
+gc()
+rm(list = ls())
+cat("\014")  
+```
