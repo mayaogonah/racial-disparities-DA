@@ -17,7 +17,7 @@ format:
 execute:
   eval: false
   echo: true
-author: Siqi Wang (updated for ABCD 6.1 data release by Maya Ogonah)
+author: Siqi Wang (updated for ABCD 7.0 data release by Maya Ogonah)
 date: today
 ---
 
