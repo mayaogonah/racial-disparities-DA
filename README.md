@@ -1,0 +1,9 @@
+# Racial and Ethnic Disparities in Disciplinary Action in Schools, Depressive Symptoms, Substance Use and Academic Performance: Results from the ABCD Study 
+
+R/Quarto repository for the manuscript 'Racial and Ethnic Disparities in Disciplinary Action in Schools, Depressive Symptoms, Substance Use and Academic Performance: Results from the ABCD Study' which is currently in preparation.
+
+The reposity contains code necessary to examine the relationship between racial and ethnic disparities in disciplinary action along a continuum of parent-reported rule-breaking behavior, youth depression symptoms, substance use, and academic achievement using data from the ABCD Study. The code was written by Siqi Wang and Maya Ogonah. The HTML file rendered from Quarto, outlines the key stages of analysis. The code was written by Siqi Wang and Dr Maya G T Ogonah; if you have any questions please email Dr Ogonah at mgo2120@columbia.edu.
+
+Data used in the preparation of this article were obtained from the Adolescent Brain Cognitive DevelopmentSM (ABCD) Study, held in the NIH Brain Development Cohorts Data Sharing Platform. This is a multisite, longitudinal study designed to recruit more than 10,000 children aged 9-10 and follow them over 10 years to early adulthood. 
+The ABCD Study® is supported by the National Institutes of Health and additional federal partners under award numbers U01DA041048, U01DA050989, U01DA051016, U01DA041022, U01DA051018, U01DA051037, U01DA050987, U01DA041174, U01DA041106, U01DA041117, U01DA041028, U01DA041134, U01DA050988, U01DA051039, U01DA041156, U01DA041025, U01DA041120, U01DA051038, U01DA041148, U01DA041093, U01DA041089, U24DA041123, U24DA041147. A full list of supporters is available at Federal Partners – ABCD Study.
+The ABCD dataset grows and changes over time. The ABCD data used in this report came from the NBDC Release 7.0 DOI can be found at https://doi.org/10.82525/8f3w-5260
